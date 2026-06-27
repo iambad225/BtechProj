@@ -1,0 +1,76 @@
+clc; clear;
+
+idle = readtable("idle.csv");
+eyeclosed = readtable("eyeclosed.csv");
+raiseRH = readtable("RHRaise.csv");
+thinkRH = readtable("RHThink.csv");
+tripleblink = readtable("tripleblink.csv");
+calc = readtable("Calc.csv");
+LR_raise_thirty = readtable("_30l30r.csv");
+
+idle.Properties.VariableNames{'Raw_EEG'} = 'raw';
+eyeclosed.Properties.VariableNames{'Raw_EEG'} = 'raw';
+raiseRH.Properties.VariableNames{'Raw_EEG'} = 'raw';
+thinkRH.Properties.VariableNames{'Raw_EEG'} = 'raw';
+tripleblink.Properties.VariableNames{'Raw_EEG'} = 'raw';
+calc.Properties.VariableNames{'Raw_EEG'} = 'raw';
+LR_raise_thirty.Properties.VariableNames{'Raw_EEG'} = 'raw';
+
+fs = 250;
+dataSets = {idle, eyeclosed, raiseRH, thinkRH, tripleblink, calc, LR_raise_thirty};
+titles = {'Idle', 'Eye Closed', 'Raise Right Hand', 'Think Right Hand', 'Triple Blink', 'Calc', 'LR Raise 30'};
+
+
+%%
+
+order = 5;
+low_cutoff = 0.5;
+high_cutoff = 35;
+[b, a] = butter(order, [low_cutoff high_cutoff] / (fs / 2), 'bandpass');
+notch_freq = 50;
+Q = 100;
+[b_notch, a_notch] = iirnotch(notch_freq/(fs/2), notch_freq/(fs/2)/Q);
+
+for i = 1:length(dataSets)
+    set = dataSets{i};
+    figure(i);
+    subplot(2,1,1)
+    plot(set.Timestamp_MS, set.raw);
+    title(sprintf('%s - Time Domain Signal', titles{i}));
+    xlabel('Time (s)');
+    ylabel('Amplitude');
+    grid on;
+
+
+    set.Filtered_EEG = filtfilt(b, a, set.raw);
+    set.Filtered_EEG = filtfilt(b_notch, a_notch, set.Filtered_EEG);
+
+    subplot(2,1,2)
+    plot(set.Timestamp_MS, set.Filtered_EEG);
+    title(sprintf('%s - Filtered Signal', titles{i}));
+    xlabel('Time (s)');
+    ylabel('Amplitude');
+    grid on;
+end
+
+
+%%
+
+for i = 1:length(dataSets) 
+    set = dataSets{i};
+    window = hamming(128);
+    nfft = 1024;
+    noverlap = nfft/4;
+    [pxx, f] = pwelch(set.raw, window, noverlap, nfft, fs);
+    [pxx1, f1] = pwelch(set.Filtered_EEG, noverlap, 256, nfft, fs);
+
+    figure(i+length(dataSets));
+    loglog(f, sqrt(pxx));
+    hold on
+    loglog(f1, sqrt(pxx1))
+    title('%s', titles{i});
+    xlabel('Frequency (Hz)');
+    ylabel('Amplitude/Frequency (dB/Hz)');
+    legend(titles{i}, 'Filtered');
+    grid on;
+end
