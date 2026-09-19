@@ -1,0 +1,58 @@
+modality: emg
+subject: subject
+board: cyton
+sample_rate: 250
+source:
+  type: cyton
+  serial_port: COM3
+  lsl_name: obci_eeg1
+  mac_address: ''
+filter:
+  enabled: true
+  notch_hz: 50
+  bandpass_low: 20
+  bandpass_high: 120
+electrodes:
+- channel: 0
+  name: flexor carpi radialis
+  role: data
+- channel: 1
+  name: extensor digitorum
+  role: data
+- channel: 2
+  name: pronator teres
+  role: data
+- channel: 3
+  name: brachioradialis
+  role: data
+window_ms: 150
+step_ms: 40
+transient_ms: 400
+labels:
+- fist
+- open_hand
+- wrist_flexion
+model_type: lda
+decision:
+  on_threshold: 0.6
+  off_threshold: 0.4
+  ema_alpha: 0.4
+car: true
+bands:
+  delta:
+  - 1.0
+  - 4.0
+  theta:
+  - 4.0
+  - 8.0
+  alpha:
+  - 8.0
+  - 12.0
+  beta:
+  - 13.0
+  - 30.0
+alpha_band: alpha
+alpha_electrodes:
+- O1
+- O2
+alpha_threshold: 0.4

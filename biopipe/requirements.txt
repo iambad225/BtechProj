@@ -1,0 +1,15 @@
+# Core (required)
+numpy>=1.23
+scipy>=1.9
+scikit-learn>=1.2
+PyYAML>=6.0
+joblib>=1.2
+
+# brainflow still imports pkg_resources, which setuptools removed in v81+
+setuptools<81
+
+# Acquisition (install the one matching your source)
+brainflow>=5.10      # source: cyton  — OpenBCI Cyton over the USB dongle
+pylsl>=1.16          # source: lsl    — any Lab Streaming Layer stream
+
+# GUI uses Tkinter, which ships with Python (on Debian/Ubuntu: apt install python3-tk)

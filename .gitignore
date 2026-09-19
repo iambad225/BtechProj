@@ -1,2 +1,4 @@
-misc_and_docs/
-papers/
+_DOCS/
+
+# Built executable (produced by biopipe/build_exe.bat, ~600 MB)
+/biopipe.exe

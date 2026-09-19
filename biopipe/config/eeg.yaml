@@ -1,0 +1,73 @@
+modality: eeg
+subject: subject
+board: cyton
+sample_rate: 250
+source:
+  type: cyton
+  serial_port: COM3
+  lsl_name: obci_eeg1
+  mac_address: ''
+filter:
+  enabled: true
+  notch_hz: 50
+  bandpass_low: 1
+  bandpass_high: 40
+electrodes:
+- channel: 0
+  name: Fp1
+  role: data
+- channel: 1
+  name: Fp2
+  role: data
+- channel: 2
+  name: C3
+  role: data
+- channel: 3
+  name: C4
+  role: data
+- channel: 4
+  name: P7
+  role: data
+- channel: 5
+  name: P8
+  role: data
+- channel: 6
+  name: O1
+  role: data
+- channel: 7
+  name: O2
+  role: data
+- channel: null
+  name: A1
+  role: ref
+- channel: null
+  name: A2
+  role: bias
+window_ms: 1000
+step_ms: 250
+transient_ms: 400
+labels: []
+model_type: lda
+decision:
+  on_threshold: 0.6
+  off_threshold: 0.4
+  ema_alpha: 0.4
+car: true
+bands:
+  delta:
+  - 1.0
+  - 4.0
+  theta:
+  - 4.0
+  - 8.0
+  alpha:
+  - 8.0
+  - 12.0
+  beta:
+  - 13.0
+  - 30.0
+alpha_band: alpha
+alpha_electrodes:
+- O1
+- O2
+alpha_threshold: 0.4
