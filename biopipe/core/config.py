@@ -11,6 +11,7 @@ for EMG) which keeps load/save and the downstream pipeline uniform.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import List, Optional
@@ -74,10 +75,11 @@ class Config:
     car: bool = True
     bands: dict = field(default_factory=lambda: {
         "delta": [1.0, 4.0], "theta": [4.0, 8.0],
-        "alpha": [8.0, 12.0], "beta": [13.0, 30.0]})
+        "alpha": [8.0, 12.0], "beta": [13.0, 30.0], "gamma": [30.0, 45.0]})
     alpha_band: str = "alpha"
     alpha_electrodes: List[str] = field(default_factory=lambda: ["O1", "O2"])
     alpha_threshold: float = 0.40
+    paradigm: str = "mi"             # eeg record/train paradigm: "mi" | "errp" | "monitor"
 
     # ---------- derived views over the electrode map ----------
     def data_electrodes(self) -> List[Electrode]:
@@ -122,9 +124,20 @@ class Config:
         return max(0, round(self.sample_rate * self.transient_ms / 1000))
 
     def alpha_columns(self) -> List[int]:
-        """Column indices (within the captured array) of the alpha electrodes."""
+        """Column indices (within the captured array) of the alpha electrodes.
+
+        Falls back to the most posterior available electrode(s) when the named
+        ``alpha_electrodes`` aren't in the montage, so the eyes-closed alpha test
+        never silently reads zero (alpha is a posterior rhythm).
+        """
         names = self.electrode_names
-        return [i for i, n in enumerate(names) if n in self.alpha_electrodes]
+        cols = [i for i, n in enumerate(names) if n in self.alpha_electrodes]
+        if cols:
+            return cols
+        from core.montage import NODES     # local import avoids a module cycle
+        posterior = sorted((i for i, n in enumerate(names) if n in NODES),
+                           key=lambda i: NODES[names[i]][1], reverse=True)
+        return posterior[:2]
 
     # aliases the EMG inference pipeline expects
     @property
@@ -172,6 +185,21 @@ class Config:
             yaml.safe_dump(self.to_dict(), f, sort_keys=False, default_flow_style=False)
 
 
+def mi_errp_montage() -> List[Electrode]:
+    """8-ch montage for the MI + ERD + ErrP build, using only physically available holes
+    (excludes FCz/CP3/CP4/CPz/FC3/FC4, which are unavailable on this headset).
+
+    Data: Fz, FC5, FC6, C3, Cz, C4, P3, P4 -> channels 0-7. Ref/bias at the ears.
+    Serves MI (symmetric lateral pairs FC5/FC6 + C3/C4 + P3/P4 for CSP), the ERD gate
+    (C3/Cz/C4), and ErrP (Fz frontal, Cz central, P3/P4 for the Pe).
+    """
+    names = ["Fz", "FC5", "FC6", "C3", "Cz", "C4", "P3", "P4"]
+    elecs = [Electrode(channel=i, name=n, role="data") for i, n in enumerate(names)]
+    elecs += [Electrode(channel=None, name="A1", role="ref"),
+              Electrode(channel=None, name="A2", role="bias")]
+    return elecs
+
+
 def default_config(modality: str) -> "Config":
     """Sensible starting config for a modality (used when no file exists yet)."""
     modality = modality.lower()
@@ -197,3 +225,42 @@ def default_config(modality: str) -> "Config":
         source=SourceConfig(type="cyton"),
         labels=["fist", "open_hand", "wrist_flexion"],   # actions only; 'rest' is implicit (all-zeros)
     )
+
+
+# ---------------- named configuration profiles ----------------
+PROFILES_ROOT = Path("config/profiles")
+
+
+def _profile_slug(name: str) -> str:
+    s = re.sub(r"[^0-9A-Za-z._ -]", "", str(name)).strip().replace(" ", "_")
+    return s or "unnamed"
+
+
+def profiles_dir(modality: str) -> Path:
+    return PROFILES_ROOT / modality
+
+
+def list_profiles(modality: str) -> List[str]:
+    d = profiles_dir(modality)
+    return sorted(p.stem for p in d.glob("*.yaml")) if d.exists() else []
+
+
+def profile_path(modality: str, name: str) -> Path:
+    return profiles_dir(modality) / f"{_profile_slug(name)}.yaml"
+
+
+def save_profile(cfg: "Config", name: str) -> Path:
+    """Save a Config under a user-given name (config/profiles/<modality>/<name>.yaml)."""
+    path = profile_path(cfg.modality, name)
+    cfg.save(path)
+    return path
+
+
+def load_profile(modality: str, name: str) -> "Config":
+    return Config.load(profile_path(modality, name))
+
+
+def delete_profile(modality: str, name: str) -> None:
+    p = profile_path(modality, name)
+    if p.exists():
+        p.unlink()

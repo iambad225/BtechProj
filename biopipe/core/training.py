@@ -11,8 +11,8 @@ from __future__ import annotations
 from typing import List, Tuple
 import numpy as np
 
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import f1_score
+from sklearn.model_selection import train_test_split, GroupShuffleSplit
+from sklearn.metrics import precision_recall_fscore_support
 
 from core.dsp import RealTimeFilter
 from core import features_emg, features_eeg
@@ -29,6 +29,17 @@ def _segments(labels: List[str]):
             yield start, i, labels[start]
             start = i
     yield start, len(labels), labels[start]
+
+
+def _trials(labels: List[str]) -> List[int]:
+    """Per-sample trial id (increments on each label change); used when a recording predates
+    the stored ``trial`` column."""
+    out, tid = [], 0
+    for i, lab in enumerate(labels):
+        if i and lab != labels[i - 1]:
+            tid += 1
+        out.append(tid)
+    return out
 
 
 def _multihot(label: str, action_index: dict) -> np.ndarray:
@@ -55,17 +66,26 @@ def _window_features(seg: np.ndarray, cfg) -> np.ndarray:
     return features_emg.extract_batch(seg, win, step)
 
 
-def build_dataset(sessions: List[Tuple[np.ndarray, List[str]]], cfg) -> Tuple[np.ndarray, np.ndarray]:
-    """sessions: list of (signal (n,ch), per-sample labels). Returns (X, Y multi-hot)."""
+def build_dataset(sessions, cfg) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Build (X, Y multi-hot, groups) from sessions.
+
+    ``sessions`` items are ``(signal, labels)`` or ``(signal, labels, trials)``. Every window
+    is tagged with a **group** = its trial (a run of a constant label), unique across sessions,
+    so the trainer can split by trial and never leak correlated windows across train/test.
+    """
     action_index = {a: i for i, a in enumerate(cfg.labels)}
-    X_parts, Y_parts = [], []
-    for signal, labels in sessions:
+    X_parts, Y_parts, G_parts = [], [], []
+    g_offset = 0
+    for sess in sessions:
+        signal, labels = sess[0], sess[1]
+        trials = sess[2] if len(sess) > 2 and sess[2] is not None else _trials(labels)
         if signal.shape[0] == 0:
             continue
         filt = RealTimeFilter(cfg.sample_rate, signal.shape[1],
                               notch_hz=cfg.filter.notch_hz,
                               bandpass=(cfg.filter.bandpass_low, cfg.filter.bandpass_high),
                               enabled=cfg.filter.enabled)
+        used = set()
         for s, e, lab in _segments(labels):
             seg = filt.filter_offline(signal[s:e])
             if seg.shape[0] > cfg.transient_samples:
@@ -75,33 +95,93 @@ def build_dataset(sessions: List[Tuple[np.ndarray, List[str]]], cfg) -> Tuple[np
             feats = _window_features(seg, cfg)
             if feats.shape[0] == 0:
                 continue
+            gid = g_offset + int(trials[s])            # trial id, made unique across sessions
+            used.add(int(trials[s]))
             target = _multihot(lab, action_index)
             X_parts.append(feats)
             Y_parts.append(np.tile(target, (feats.shape[0], 1)))
+            G_parts.append(np.full(feats.shape[0], gid))
+        g_offset += (max(used) + 1) if used else 0
     if not X_parts:
-        return np.empty((0, 0)), np.empty((0, len(cfg.labels)), dtype=int)
-    return np.vstack(X_parts), np.vstack(Y_parts)
+        return (np.empty((0, 0)), np.empty((0, len(cfg.labels)), dtype=int),
+                np.empty((0,), dtype=int))
+    return np.vstack(X_parts), np.vstack(Y_parts), np.concatenate(G_parts)
 
 
-def train(X: np.ndarray, Y: np.ndarray, actions: List[str], model_type: str,
-          test_size: float = 0.2, seed: int = 0) -> Tuple[MultiLabelClassifier, dict]:
+def _combo_ids(Y: np.ndarray) -> np.ndarray:
+    """Map each multi-hot row to an int id for its action-combo (all-zeros = 'rest'). Used to
+    stratify the grouped folds by label combination (every trial is one combo)."""
+    seen, ids = {}, []
+    for row in Y:
+        key = tuple(int(v) for v in row)
+        ids.append(seen.setdefault(key, len(seen)))
+    return np.asarray(ids)
+
+
+def _emg_folds(X, Y, groups, seed, max_folds=5):
+    """Return (list_of_(train_idx,test_idx), split_label). Trial-grouped, class-stratified
+    k-fold when there are enough trials per combo; else a single grouped/random holdout."""
+    groups = np.asarray(groups)
+    strat = _combo_ids(Y)
+    per_combo = [len(np.unique(groups[strat == c])) for c in np.unique(strat)]
+    k = min(max_folds, min(per_combo)) if per_combo else 0
+    if k >= 2:
+        try:
+            from sklearn.model_selection import StratifiedGroupKFold
+            sp = StratifiedGroupKFold(n_splits=k, shuffle=True, random_state=seed)
+        except Exception:                       # older sklearn
+            from sklearn.model_selection import GroupKFold
+            sp = GroupKFold(n_splits=k)
+        return list(sp.split(X, strat, groups)), f"{k}-fold grouped CV"
+    if len(np.unique(groups)) >= 2:             # too few trials to k-fold: one grouped holdout
+        gss = GroupShuffleSplit(n_splits=1, test_size=0.25, random_state=seed)
+        return [next(gss.split(X, Y, groups))], "grouped holdout (too few trials for k-fold)"
+    idx = np.arange(X.shape[0])                  # last resort: random holdout
+    return [train_test_split(idx, test_size=0.2, random_state=seed, shuffle=True)], \
+           "random holdout (too few trials)"
+
+
+def train(X: np.ndarray, Y: np.ndarray, groups: np.ndarray, actions: List[str], model_type: str,
+          seed: int = 0, max_folds: int = 5) -> Tuple[MultiLabelClassifier, dict]:
+    """Train the multi-label model with **trial-grouped, class-stratified k-fold CV**.
+
+    Whole trials (``groups``) are held out per fold so temporally correlated windows never
+    straddle the split (random window splitting would inflate the score via leakage). Per-label
+    precision/recall/f1/support come from the pooled out-of-fold predictions; the final model is
+    refit on all data. Falls back to a single grouped (or random) holdout when trials are scarce.
+    """
     if X.shape[0] < 10:
         raise ValueError(f"Only {X.shape[0]} windows — record more data before training.")
-    Xtr, Xte, Ytr, Yte = train_test_split(X, Y, test_size=test_size, random_state=seed, shuffle=True)
-    probe = MultiLabelClassifier(actions, model_type).fit(Xtr, Ytr)
-    pred = (probe.predict_proba(Xte) >= 0.5).astype(int)
-    accuracy = float((pred == Yte).all(axis=1).mean())      # subset (all-labels) accuracy
-    per_class = {}
-    for i, a in enumerate(actions):
-        if Yte[:, i].sum() and (Yte[:, i] == 0).sum():
-            per_class[a] = round(float(f1_score(Yte[:, i], pred[:, i], zero_division=0)), 3)
-        else:
-            per_class[a] = None
+    Y = np.asarray(Y)
+    n_trials = int(len(np.unique(np.asarray(groups)))) if np.asarray(groups).size else 0
+    folds, split = _emg_folds(X, Y, groups, seed, max_folds)
+
+    Yt_parts, Yp_parts, fold_acc = [], [], []
+    for tr, te in folds:
+        try:
+            m = MultiLabelClassifier(actions, model_type).fit(X[tr], Y[tr])
+            pred = (m.predict_proba(X[te]) >= 0.5).astype(int)
+        except Exception:
+            continue
+        Yt_parts.append(Y[te]); Yp_parts.append(pred)
+        fold_acc.append(float((pred == Y[te]).all(axis=1).mean()))
+    if not fold_acc:
+        raise ValueError("Could not evaluate — every fold failed to train (too little data?).")
+    Yt, Yp = np.vstack(Yt_parts), np.vstack(Yp_parts)
+
+    p, r, f, s = precision_recall_fscore_support(Yt, Yp, average=None, zero_division=0)
+    per_class = {a: {"precision": round(float(p[i]), 3), "recall": round(float(r[i]), 3),
+                     "f1": round(float(f[i]), 3), "support": int(s[i])}
+                 for i, a in enumerate(actions)}
     model = MultiLabelClassifier(actions, model_type).fit(X, Y)   # final model on all data
     metrics = {
-        "accuracy": round(accuracy, 3),
-        "per_class_f1": per_class,
-        "test_size": test_size,
+        "accuracy": round(float(np.mean(fold_acc)), 3),          # subset accuracy (mean over folds)
+        "accuracy_std": round(float(np.std(fold_acc)), 3),
+        "macro_f1": round(float(np.mean(f)), 3),
+        "cv_folds": len(fold_acc),
+        "per_class": per_class,
+        "split": split,
+        "n_trials": n_trials,
         "n_windows": int(X.shape[0]),
         "n_features": int(X.shape[1]),
     }

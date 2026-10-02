@@ -1,4 +1,11 @@
-_DOCS/
+# Reference material (textbooks, papers, coursework) stays local; only our own docs are tracked.
+_DOCS/*
+!_DOCS/EEG_Paradigms_8channel_Analysis.pdf
+!_DOCS/ERD-ERS_MI_ErrP_Training_Methodology.pdf
+!_DOCS/source/
+
+# OpenBCI GUI application install (~510 MB of third-party binaries)
+/OpenBCI_GUI/
 
 # Built executable (produced by biopipe/build_exe.bat, ~600 MB)
 /biopipe.exe

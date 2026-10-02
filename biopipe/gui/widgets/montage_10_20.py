@@ -1,20 +1,21 @@
-"""Visual 10-20 electrode selector.
+"""Visual 10-20 / 10-10 electrode selector.
 
-A head diagram with a clickable node per 10-20 position. A mode selector chooses what a
-click does: enable as **Data** (a small entry appears under the node to assign its board
-channel 0-7), mark as **Ref (SRB)** / **Bias**, or **Clear**. Reads back a list of
-``core.config.Electrode``. Redraws responsively on resize.
+A head diagram with a clickable node per electrode. The classic 10-20 electrodes are drawn
+with a solid outline; the extended 10-10 positions with a dotted outline. Electrodes that
+were renamed between the systems show the old name in brackets (e.g. "T7 (T3)"). A mode
+selector chooses what a click does: enable as Data (a box appears to type its board channel
+0-7), mark as Ref (SRB) / Bias, or Clear. Reads back a list of ``core.config.Electrode``.
 """
 from __future__ import annotations
 
 import tkinter as tk
 from tkinter import ttk
 
-from core.montage import NODES_10_20
+from core.montage import NODES, TEN_TWENTY, ALIASES
 from core.config import Electrode
 
 ROLE_COLORS = {
-    "off": ("#e9e9e9", "#aaaaaa"),
+    "off": ("#ececec", "#a7a7a7"),
     "data": ("#4a90d9", "#204a70"),
     "ref": ("#f39c12", "#a35f00"),
     "bias": ("#e74c3c", "#8a1c11"),
@@ -24,8 +25,8 @@ ROLE_COLORS = {
 class Montage1020(ttk.Frame):
     def __init__(self, master, **kw):
         super().__init__(master, **kw)
-        self.roles = {n: "off" for n in NODES_10_20}
-        self.chan_vars = {n: tk.StringVar() for n in NODES_10_20}
+        self.roles = {n: "off" for n in NODES}
+        self.chan_vars = {n: tk.StringVar() for n in NODES}
         self.mode = tk.StringVar(value="data")
 
         top = ttk.Frame(self)
@@ -43,10 +44,9 @@ class Montage1020(ttk.Frame):
         self.canvas.bind("<Configure>", lambda e: self._redraw())
         self.after(60, self._redraw)
 
-    # ---- geometry ----
     def _node_xy(self, name, W, H):
-        nx, ny = NODES_10_20[name]
-        size = min(W, H) - 80
+        nx, ny = NODES[name]
+        size = min(W, H) - 60
         return W / 2 + (nx - 0.5) * size, H / 2 + (ny - 0.5) * size
 
     def _redraw(self):
@@ -55,33 +55,42 @@ class Montage1020(ttk.Frame):
         W, H = cv.winfo_width(), cv.winfo_height()
         if W < 20 or H < 20:
             return
-        size = min(W, H) - 80
-        cx, cy, r = W / 2, H / 2, size / 2 * 1.18
-        cv.create_oval(cx - r, cy - r, cx + r, cy + r, outline="#c8c8c8", width=2)
-        cv.create_polygon(cx - 12, cy - r + 2, cx + 12, cy - r + 2, cx, cy - r - 16,
-                          outline="#c8c8c8", fill="", width=2)              # nose
+        size = min(W, H) - 60
+        cx, cy, r = W / 2, H / 2, size / 2 * 1.16
+        cv.create_oval(cx - r, cy - r, cx + r, cy + r, outline="#cccccc", width=2)
+        cv.create_polygon(cx - 11, cy - r + 2, cx + 11, cy - r + 2, cx, cy - r - 15,
+                          outline="#cccccc", fill="", width=2)                       # nose
 
         for w in self._entries.values():
             w.destroy()
         self._entries = {}
-        rad = 17
-        for name in NODES_10_20:
+        rad = max(10, int(min(W, H) * 0.023))
+        for name in NODES:
             x, y = self._node_xy(name, W, H)
             role = self.roles[name]
             fill, outline = ROLE_COLORS[role]
+            solid = name in TEN_TWENTY
             cv.create_oval(x - rad, y - rad, x + rad, y + rad, fill=fill, outline=outline,
-                           width=2, tags=("node", name))
-            cv.create_text(x, y, text=name, font=("", 8, "bold"),
-                           fill=("white" if role != "off" else "#555"), tags=("node", name))
+                           width=(2 if solid else 1), dash=(() if solid else (2, 2)),
+                           tags=("node", name))
+            tcol = "white" if role != "off" else "#333333"
+            alias = ALIASES.get(name)
+            if alias:
+                cv.create_text(x, y - 4, text=name, font=("", 7, "bold"), fill=tcol, tags=("node", name))
+                cv.create_text(x, y + 5, text=f"({alias})", font=("", 6), fill=tcol, tags=("node", name))
+            else:
+                cv.create_text(x, y, text=name, font=("", 7, "bold"), fill=tcol, tags=("node", name))
             cv.tag_bind(name, "<Button-1>", lambda e, n=name: self._on_click(n))
             if role == "data":
                 ent = tk.Entry(cv, width=2, textvariable=self.chan_vars[name], justify="center")
-                cv.create_window(x, y + rad + 11, window=ent)
+                cv.create_window(x, y + rad + 9, window=ent)
                 self._entries[name] = ent
-        cv.create_text(10, H - 10, anchor="w", font=("", 8),
-                       fill="#999", text="blue = data (enter channel)   orange = ref (SRB)   red = bias")
 
-    # ---- interaction ----
+        cv.create_text(10, H - 22, anchor="w", font=("", 8), fill="#999",
+                       text="solid = 10-20   ··· dotted = 10-10 extended   ·   () = alt. designation")
+        cv.create_text(10, H - 8, anchor="w", font=("", 8), fill="#999",
+                       text="blue = data (enter channel)   orange = ref (SRB)   red = bias")
+
     def _on_click(self, name):
         mode = self.mode.get()
         if mode == "off" or self.roles[name] == mode:
@@ -101,7 +110,6 @@ class Montage1020(ttk.Frame):
                 return c
         return 0
 
-    # ---- API ----
     def get_electrodes(self) -> list[Electrode]:
         out = []
         for name, role in self.roles.items():
@@ -113,7 +121,7 @@ class Montage1020(ttk.Frame):
         return out
 
     def set_electrodes(self, electrodes) -> None:
-        self.roles = {n: "off" for n in NODES_10_20}
+        self.roles = {n: "off" for n in NODES}
         for v in self.chan_vars.values():
             v.set("")
         for e in electrodes:

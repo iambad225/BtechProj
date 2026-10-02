@@ -17,6 +17,7 @@ import storage.recordings as recordings
 import storage.models as models
 from gui.widgets.waveform import Waveform
 from gui.widgets.bars import LevelBars
+from gui.widgets.profile_bar import ProfileBar
 
 CONFIG_PATH = "config/emg.yaml"
 
@@ -199,11 +200,9 @@ class EMGTab(ttk.Frame):
 
     def _build_config(self):
         t = self.t_cfg
-        r = 0
-        ttk.Label(t, text="Subject").grid(row=r, column=0, sticky="e", padx=4, pady=2)
-        self.v_subject = tk.StringVar(value=self.cfg.subject)
-        ttk.Entry(t, textvariable=self.v_subject, width=18).grid(row=r, column=1, sticky="w"); r += 1
-
+        self.profile_bar = ProfileBar(t, "emg", get_cfg=self._collect_cfg, on_load=self._on_profile_load)
+        self.profile_bar.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 6))
+        r = 1
         ttk.Label(t, text="Source").grid(row=r, column=0, sticky="e", padx=4, pady=2)
         self.v_src = tk.StringVar(value=self.cfg.source.type)
         ttk.Combobox(t, textvariable=self.v_src, values=["cyton", "lsl", "synthetic"],
@@ -303,23 +302,27 @@ class EMGTab(ttk.Frame):
         if sel:
             self.actions_list.delete(sel[0])
 
+    def _collect_cfg(self):
+        """Read the Config tab widgets into self.cfg (raises ValueError on invalid input)."""
+        self.cfg.source.type = self.v_src.get()
+        self.cfg.source.serial_port = self.v_port.get().strip()
+        self.cfg.sample_rate = int(float(self.v_sr.get()))
+        self.cfg.filter.notch_hz = float(self.v_notch.get())
+        self.cfg.filter.bandpass_low = float(self.v_lo.get())
+        self.cfg.filter.bandpass_high = float(self.v_hi.get())
+        self.cfg.window_ms = int(float(self.v_win.get()))
+        self.cfg.step_ms = int(float(self.v_step.get()))
+        self.cfg.electrodes = self._read_electrodes()
+        self.cfg.labels = list(self.actions_list.get(0, tk.END))
+        if not self.cfg.electrodes:
+            raise ValueError("Add at least one electrode (channel + label).")
+        if not self.cfg.labels:
+            raise ValueError("Add at least one action.")
+        return self.cfg
+
     def _apply(self):
         try:
-            self.cfg.subject = self.v_subject.get().strip() or "subject"
-            self.cfg.source.type = self.v_src.get()
-            self.cfg.source.serial_port = self.v_port.get().strip()
-            self.cfg.sample_rate = int(float(self.v_sr.get()))
-            self.cfg.filter.notch_hz = float(self.v_notch.get())
-            self.cfg.filter.bandpass_low = float(self.v_lo.get())
-            self.cfg.filter.bandpass_high = float(self.v_hi.get())
-            self.cfg.window_ms = int(float(self.v_win.get()))
-            self.cfg.step_ms = int(float(self.v_step.get()))
-            self.cfg.electrodes = self._read_electrodes()
-            self.cfg.labels = list(self.actions_list.get(0, tk.END))
-            if not self.cfg.electrodes:
-                raise ValueError("Add at least one electrode (channel + label).")
-            if not self.cfg.labels:
-                raise ValueError("Add at least one action.")
+            self._collect_cfg()
         except Exception as e:
             messagebox.showerror("Invalid config", str(e)); return
         self.cfg.save(CONFIG_PATH)
@@ -329,6 +332,33 @@ class EMGTab(ttk.Frame):
         self._build_live_bars()
         self._refresh_record_plan()
         self.cfg_status.config(text=f"Saved -> {CONFIG_PATH} ({self.cfg.n_channels} ch, {self.cfg.n_labels} actions)")
+
+    def _populate_config(self, cfg):
+        """Set the Config tab widgets from a Config (used when loading a profile)."""
+        self.v_src.set(cfg.source.type)
+        self.v_port.set(cfg.source.serial_port)
+        self.v_sr.set(str(cfg.sample_rate))
+        self.v_notch.set(str(cfg.filter.notch_hz))
+        self.v_lo.set(str(cfg.filter.bandpass_low))
+        self.v_hi.set(str(cfg.filter.bandpass_high))
+        self.v_win.set(str(cfg.window_ms))
+        self.v_step.set(str(cfg.step_ms))
+        self._render_electrodes()
+        self.actions_list.delete(0, tk.END)
+        for a in cfg.labels:
+            self.actions_list.insert(tk.END, a)
+
+    def _on_profile_load(self, cfg):
+        cfg.modality = "emg"
+        self.cfg = cfg
+        self._populate_config(cfg)
+        cfg.save(CONFIG_PATH)
+        self.engine.stop()
+        self.engine = EMGEngine(self.cfg)
+        self._build_monitor_bars()
+        self._build_live_bars()
+        self._refresh_record_plan()
+        self.cfg_status.config(text=f"Profile applied ({self.cfg.n_channels} ch, {self.cfg.n_labels} actions).")
 
     # ---------- monitor ----------
     def _build_monitor(self):
@@ -374,21 +404,24 @@ class EMGTab(ttk.Frame):
         ttk.Label(t, text="Guided capture: records 'rest' + each action, cycling for the "
                           "chosen reps, into one session.", foreground="#555").grid(
             row=0, column=0, columnspan=4, sticky="w", pady=(0, 8))
-        ttk.Label(t, text="Seconds per class").grid(row=1, column=0, sticky="e", padx=4)
+        ttk.Label(t, text="Subject").grid(row=1, column=0, sticky="e", padx=4)
+        self.v_subject = tk.StringVar(value=self.cfg.subject)
+        ttk.Entry(t, textvariable=self.v_subject, width=18).grid(row=1, column=1, sticky="w")
+        ttk.Label(t, text="Seconds per class").grid(row=2, column=0, sticky="e", padx=4)
         self.v_secs = ttk.Spinbox(t, from_=2, to=15, width=5); self.v_secs.set(4)
-        self.v_secs.grid(row=1, column=1, sticky="w")
-        ttk.Label(t, text="Reps").grid(row=2, column=0, sticky="e", padx=4)
+        self.v_secs.grid(row=2, column=1, sticky="w")
+        ttk.Label(t, text="Reps").grid(row=3, column=0, sticky="e", padx=4)
         self.v_reps = ttk.Spinbox(t, from_=1, to=10, width=5); self.v_reps.set(3)
-        self.v_reps.grid(row=2, column=1, sticky="w")
-        ttk.Label(t, text="Description (optional)").grid(row=3, column=0, sticky="e", padx=4)
+        self.v_reps.grid(row=3, column=1, sticky="w")
+        ttk.Label(t, text="Description (optional)").grid(row=4, column=0, sticky="e", padx=4)
         self.v_desc = tk.StringVar()
-        ttk.Entry(t, textvariable=self.v_desc, width=40).grid(row=3, column=1, columnspan=3, sticky="w")
+        ttk.Entry(t, textvariable=self.v_desc, width=40).grid(row=4, column=1, columnspan=3, sticky="w")
         self.rec_btn = ttk.Button(t, text="● Record session", command=self._record)
-        self.rec_btn.grid(row=4, column=0, sticky="w", pady=8)
+        self.rec_btn.grid(row=5, column=0, sticky="w", pady=8)
         self.rec_status = ttk.Label(t, text="", foreground="#0a7")
-        self.rec_status.grid(row=5, column=0, columnspan=4, sticky="w")
+        self.rec_status.grid(row=6, column=0, columnspan=4, sticky="w")
         self.rec_plan = ttk.Label(t, text="", foreground="#555")
-        self.rec_plan.grid(row=6, column=0, columnspan=4, sticky="w")
+        self.rec_plan.grid(row=7, column=0, columnspan=4, sticky="w")
         self._refresh_record_plan()
 
     def _refresh_record_plan(self):
@@ -396,6 +429,7 @@ class EMGTab(ttk.Frame):
             self.rec_plan.config(text="Plan: " + " -> ".join(["rest"] + self.cfg.labels))
 
     def _record(self):
+        self.cfg.subject = self.v_subject.get().strip() or "subject"
         self.rec_btn.config(state="disabled")
         try:
             self.engine.start()
@@ -484,7 +518,7 @@ class EMGTab(ttk.Frame):
         if self.engine.mode == "monitor":
             with self.engine._lock:
                 buf = self.engine._buf.copy(); rms = np.array(self.engine.rms); sps = self.engine.sps
-            self.mon_wave.draw(buf)
+            self.mon_wave.draw(buf, fs=self.cfg.sample_rate, labels=self.cfg.electrode_names)
             for i in range(min(len(self.mon_bars.rows), len(rms))):
                 self._mon_scale[i] = max(self._mon_scale[i] * 0.95, rms[i] * 1.2, 1e-3)
                 self.mon_bars.set(i, rms[i] / self._mon_scale[i], f"{rms[i]:.1f}")

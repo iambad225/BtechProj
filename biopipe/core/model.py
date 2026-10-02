@@ -22,6 +22,7 @@ from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.svm import SVC
+from sklearn.tree import DecisionTreeClassifier
 
 
 def _base_estimator(kind: str):
@@ -34,6 +35,8 @@ def _base_estimator(kind: str):
         return RandomForestClassifier(n_estimators=200, n_jobs=-1, class_weight="balanced")
     if kind == "svm":
         return SVC(kernel="rbf", probability=True, class_weight="balanced")
+    if kind == "tree":
+        return DecisionTreeClassifier(random_state=0, class_weight="balanced")
     raise ValueError(f"Unknown model type: {kind!r}")
 
 

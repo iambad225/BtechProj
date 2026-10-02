@@ -9,33 +9,27 @@ source:
   mac_address: ''
 filter:
   enabled: true
-  notch_hz: 50
-  bandpass_low: 1
-  bandpass_high: 40
+  notch_hz: 50.0
+  bandpass_low: 8.0
+  bandpass_high: 30.0
 electrodes:
 - channel: 0
-  name: Fp1
-  role: data
-- channel: 1
-  name: Fp2
-  role: data
-- channel: 2
-  name: C3
+  name: Fz
   role: data
 - channel: 3
-  name: C4
+  name: C3
   role: data
 - channel: 4
-  name: P7
+  name: Cz
   role: data
 - channel: 5
-  name: P8
+  name: C4
   role: data
 - channel: 6
-  name: O1
+  name: P3
   role: data
 - channel: 7
-  name: O2
+  name: P4
   role: data
 - channel: null
   name: A1
@@ -43,10 +37,18 @@ electrodes:
 - channel: null
   name: A2
   role: bias
-window_ms: 1000
-step_ms: 250
+- channel: 1
+  name: FC5
+  role: data
+- channel: 2
+  name: FC6
+  role: data
+window_ms: 4000
+step_ms: 1000
 transient_ms: 400
-labels: []
+labels:
+- mi_left
+- mi_right
 model_type: lda
 decision:
   on_threshold: 0.6
@@ -66,8 +68,12 @@ bands:
   beta:
   - 13.0
   - 30.0
+  gamma:
+  - 30.0
+  - 45.0
 alpha_band: alpha
 alpha_electrodes:
-- O1
-- O2
-alpha_threshold: 0.4
+- P3
+- P4
+alpha_threshold: 0.2
+paradigm: mi

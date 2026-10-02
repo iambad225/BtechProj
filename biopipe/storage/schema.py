@@ -55,6 +55,8 @@ class RecordingMeta:
     labels: List[str]
     n_samples: int
     duration_s: float
+    paradigm: str = ""              # eeg: "mi" | "errp" | "" (generic/monitor)
+    n_trials: int = 0               # number of labelled trials (runs of a constant label)
     description: str = ""
     schema_version: int = SCHEMA_VERSION
 
@@ -95,6 +97,7 @@ class ModelMeta:
     window_ms: int
     step_ms: int
     metrics: dict
+    paradigm: str = ""              # eeg: "mi" | "erd" | "errp"
     description: str = ""
     schema_version: int = SCHEMA_VERSION
 

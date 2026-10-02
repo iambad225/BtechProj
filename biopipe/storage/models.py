@@ -9,13 +9,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List
 
-from core.model import MultiLabelClassifier
+import joblib
 from storage.schema import ModelMeta
 
 MODELS_ROOT = Path("models")
 
 
-def save_model(model: MultiLabelClassifier, meta: ModelMeta) -> Path:
+def save_model(model, meta: ModelMeta) -> Path:
     base = meta.folder_name()
     folder = MODELS_ROOT / base
     folder.mkdir(parents=True, exist_ok=True)
@@ -44,8 +44,9 @@ def list_models(modality: str | None = None) -> List[dict]:
     return out
 
 
-def load_model(folder: str | Path) -> tuple[MultiLabelClassifier, ModelMeta]:
+def load_model(folder: str | Path):
+    """Load any saved model (EMG MultiLabelClassifier or EEG MI/ERD/ErrP) + its metadata."""
     folder = Path(folder)
     meta = ModelMeta.from_json(folder / f"{folder.name}.json")
-    model = MultiLabelClassifier.load(folder / f"{folder.name}.joblib")
+    model = joblib.load(folder / f"{folder.name}.joblib")
     return model, meta
