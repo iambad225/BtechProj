@@ -8,6 +8,10 @@ Windows/epochs are grouped by trial (recording segment / feedback event) and val
 **trial-grouped k-fold cross-validation** (whole trials held out per fold, stratified by class
 so no trial's windows leak across folds), reporting per-class precision / recall / f1 / support
 on the pooled out-of-fold predictions; the final model is then refit on all data.
+
+Filtering is **causal** (``causal_bandpass``): the same forward-only filter the Live / ErrP Live
+tabs run over the stream, so live windows and epochs are processed exactly like training ones and
+a live decision never has to wait for future samples. Models record ``metrics["filter"]``.
 """
 from __future__ import annotations
 
@@ -16,7 +20,7 @@ import numpy as np
 from sklearn.metrics import (balanced_accuracy_score, accuracy_score,
                              precision_recall_fscore_support)
 
-from core.eeg_models import MIModel, ErrPModel, bandpass, epoch_signal
+from core.eeg_models import MIModel, ErrPModel, causal_bandpass, epoch_signal
 from core.quality import check_sessions
 
 MI_BAND = (8.0, 30.0)
@@ -55,7 +59,7 @@ def collect_mi(sessions, cfg):
     for sig, labels in sessions:
         if sig.shape[0] == 0:
             continue
-        f = bandpass(sig, cfg.sample_rate, *MI_BAND)
+        f = causal_bandpass(sig, cfg.sample_rate, *MI_BAND)     # same causal filter as Live
         for s, e, lab in _segments(labels):
             key = "rest" if lab.lower() == "rest" else lab
             if key not in buckets:
@@ -80,7 +84,7 @@ def collect_errp(sessions, cfg):
     for sig, labels in sessions:
         if sig.shape[0] == 0:
             continue
-        f = bandpass(sig, cfg.sample_rate, *ERRP_BAND)
+        f = causal_bandpass(sig, cfg.sample_rate, *ERRP_BAND)   # same causal filter as ErrP Live
         onsets, tags = [], []
         i = 0
         while i < len(labels):
@@ -168,7 +172,7 @@ def train_mi(sessions, cfg) -> Tuple[MIModel, dict]:
         raise ValueError(f"Not enough MI data ({len(epochs)} windows over classes {classes}). "
                          "Record rest + both MI classes with more reps.")
     cv = _grouped_cv(lambda: MIModel(classes, clf=clf), epochs, y, groups, len(classes))
-    metrics = {"paradigm": "mi", "classes": classes, "classifier": clf,
+    metrics = {"paradigm": "mi", "classes": classes, "classifier": clf, "filter": "causal",
                "n_windows": len(epochs), "n_trials": int(len(np.unique(groups)))}
     metrics.update(_cv_metrics(cv, classes))
     model = MIModel(classes, clf=clf).fit(epochs, y)      # final model on all data
@@ -181,7 +185,7 @@ def train_errp(sessions, cfg) -> Tuple[ErrPModel, dict]:
         raise ValueError(f"Not enough ErrP epochs ({len(epochs)}) with both error and correct.")
     classes = ["correct", "error"]
     cv = _grouped_cv(lambda: ErrPModel(), epochs, y, groups, 2)
-    metrics = {"paradigm": "errp", "classes": classes, "n_epochs": len(epochs),
+    metrics = {"paradigm": "errp", "classes": classes, "filter": "causal", "n_epochs": len(epochs),
                "n_errors": int(np.sum(y == 1)), "n_trials": int(len(np.unique(groups)))}
     metrics.update(_cv_metrics(cv, classes))
     model = ErrPModel().fit(epochs, y)                    # final model on all data

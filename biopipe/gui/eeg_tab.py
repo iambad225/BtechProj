@@ -6,6 +6,7 @@ config + data now so models can be trained once the EEG paradigms are designed.
 from __future__ import annotations
 
 import queue
+from collections import deque
 import random
 import threading
 import time
@@ -17,7 +18,8 @@ from core.config import Config, default_config, Electrode, mi_errp_montage
 from core.dsp import RealTimeFilter
 from core import features_eeg as EF
 from core.montage import OCCIPITAL
-from core.eeg_models import bandpass
+from core.eeg_models import StreamBandpass, epoch_signal
+from core.eeg_training import ERRP_BAND, ERRP_TMIN, ERRP_TMAX
 from core.quality import channel_status, dead_channels
 from sources import create_source
 from sources.synthetic_eeg import EEGSyntheticSource
@@ -89,11 +91,72 @@ class EEGEngine:
         self._errp_total = 0
         # live inference (one or more trained models)
         self.live_specs = []
-        self._live_buf = np.zeros((0, cfg.n_channels))
+        self._live_filt = {}                # band -> StreamBandpass (causal, as in training)
+        self._live_fbuf = {}                # band -> filtered stream buffer
         self._live_span = int(cfg.sample_rate * 4)
         self._live_step_s = 0.25
         self._live_t = 0.0
         self.live_ms = 0.0
+        # live ErrP test (event-locked: the GUI marks each outcome, the engine classifies it)
+        self._el_buf = np.zeros((0, cfg.n_channels))
+        self._el_gend = None               # global index just past _el_buf's newest sample
+        self._el_pending = []              # (global_sample_index, label) awaiting post-event data
+        self._el_spec = None               # {"model": ErrPModel, "cols": [...]}
+        self._el_qt = 0.0
+        self._errp_g0 = None               # global index of the first recorded ErrP sample
+        self._clock_reset()
+
+    # ----- stream clock: PC time <-> sample index, immune to buffering bursts -----
+    # Sample k is acquired at off + k/fs. A chunk whose newest sample k arrives at time t gives
+    # t - k/fs >= off, with equality only when nothing delayed it; the running minimum over a
+    # window therefore tracks the stream's fastest path (and slow PC/board clock drift), while
+    # late or bursty deliveries can't move it.
+    CLOCK_WIN_S, STALE_WIN_S = 20.0, 5.0
+
+    def _clock_reset(self):
+        self._rx_total = 0                  # samples received since the source started
+        self._clk = deque()                 # monotonic min-deque of (t_arrival, t - k/fs)
+        self._stale = deque()               # (t, ms the newest sample lags the fastest path)
+
+    def _clock_update(self, t, n):
+        """Called once per loop iteration with the chunk size n (may be 0). Returns the global
+        index just past the newest received sample."""
+        fs = self.cfg.sample_rate
+        with self._lock:
+            if n:
+                self._rx_total += n
+                v = t - (self._rx_total - 1) / fs
+                dq = self._clk
+                while dq and dq[-1][1] >= v:
+                    dq.pop()
+                dq.append((t, v))
+                while dq[0][0] < t - self.CLOCK_WIN_S:
+                    dq.popleft()
+            if self._clk:
+                lag = (t - self._clk[0][1]) - (self._rx_total - 1) / fs
+                self._stale.append((t, max(0.0, lag) * 1000.0))
+                while self._stale and self._stale[0][0] < t - self.STALE_WIN_S:
+                    self._stale.popleft()
+            return self._rx_total
+
+    def index_at(self, t):
+        """Global index of the sample acquired at PC time ``t`` (time.perf_counter), offset only by
+        the stream's fixed minimum latency - so it is the same in Record and ErrP Live."""
+        with self._lock:
+            if not self._clk:
+                return self._rx_total
+            off = self._clk[0][1]
+        return int(round((t - off) * self.cfg.sample_rate))
+
+    def latency_stats(self):
+        """How stale the newest sample is (ms beyond the fastest path) over the last few seconds:
+        {"typ": median, "p95": 95th percentile, "max": worst}, or None before data arrives."""
+        with self._lock:
+            lags = [ms for _, ms in self._stale]
+        if len(lags) < 20:
+            return None
+        a = np.asarray(lags)
+        return {"typ": float(np.median(a)), "p95": float(np.percentile(a, 95)), "max": float(a.max())}
 
     def start(self):
         if self._running:
@@ -104,6 +167,7 @@ class EEGEngine:
                                     notch_hz=self.cfg.filter.notch_hz,
                                     bandpass=(self.cfg.filter.bandpass_low, self.cfg.filter.bandpass_high),
                                     enabled=self.cfg.filter.enabled)
+        self._clock_reset()
         self._running = True
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
@@ -141,6 +205,7 @@ class EEGEngine:
     def start_errp(self):
         with self._lock:
             self._errp_sig = []; self._errp_markers = []; self._errp_total = 0
+            self._errp_g0 = None
         self.mode = "errp"
 
     def start_live(self, specs):
@@ -152,27 +217,34 @@ class EEGEngine:
         wins = [s["win"] for s in specs] or [self.cfg.window_samples]
         self._live_span = max(wins) + self.cfg.sample_rate      # +1 s of margin
         self._live_step_s = max(self.cfg.step_ms, 150) / 1000.0
+        # one causal filter per band, run continuously over the stream (as in training), so the
+        # newest samples of a window are valid rather than distorted by a filter edge
+        bands = {tuple(s["band"]) for s in specs}
+        self._live_filt = {b: StreamBandpass(self.cfg.sample_rate, b[0], b[1], self.cfg.n_channels)
+                           for b in bands}
         with self._lock:
-            self._live_buf = np.zeros((0, self.cfg.n_channels))
+            self._live_fbuf = {b: np.zeros((0, self.cfg.n_channels)) for b in bands}
         self.live_ms = 0.0; self._live_t = 0.0
         self.mode = "live"
 
     def _do_live(self, new):
         if new.shape[0]:
+            filtered = {b: f.process(new) for b, f in self._live_filt.items()}
             with self._lock:
-                self._live_buf = np.vstack([self._live_buf, new])[-self._live_span:]
+                for b, y in filtered.items():
+                    self._live_fbuf[b] = np.vstack([self._live_fbuf[b], y])[-self._live_span:]
         now = time.perf_counter()
         if now - self._live_t < self._live_step_s:
             return
         self._live_t = now
         with self._lock:
-            buf = self._live_buf.copy()
+            fbuf = {b: v.copy() for b, v in self._live_fbuf.items()}
         t0 = time.perf_counter()
         for s in self.live_specs:
+            buf = fbuf[tuple(s["band"])]
             if buf.shape[0] < s["win"]:
                 continue
-            w = buf[-s["win"]:][:, s["cols"]]
-            wf = bandpass(w, self.cfg.sample_rate, s["band"][0], s["band"][1])
+            wf = buf[-s["win"]:][:, s["cols"]]
             try:
                 proba = np.asarray(s["model"].predict_proba([wf])[0], dtype=float)
             except Exception:
@@ -182,18 +254,80 @@ class EEGEngine:
                 s["top"] = int(np.argmax(proba))
         self.live_ms = (time.perf_counter() - t0) * 1000.0
 
-    def mark_event(self, label):
-        """Mark a feedback event ('error'/'correct') at the current sample position."""
+    def mark_event(self, label, t=None):
+        """Mark a feedback event ('error'/'correct') shown at PC time ``t`` (default: now). The
+        sample is located through the stream clock, not 'samples received so far', so buffering
+        delays at that instant don't shift the marker."""
+        g = self.index_at(time.perf_counter() if t is None else t)
         with self._lock:
-            self._errp_markers.append((self._errp_total, label))
+            self._errp_markers.append((g, label))           # global index; localised at finish
+
+    # ----- live ErrP test -----
+    EL_KEEP_S = 8.0                        # seconds of stream kept for epoching
+
+    def start_errp_live(self, spec):
+        """spec: {"model": ErrPModel, "cols": model electrode columns}. Outcomes are marked with
+        mark_live_event(); each is classified once enough post-event data has arrived and the
+        result is posted as ("errp_result", label, p_error, dead_channels)."""
+        with self._lock:
+            self._el_buf = np.zeros((0, self.cfg.n_channels)); self._el_gend = None
+            self._el_fbuf = np.zeros((0, self.cfg.n_channels))
+            self._el_pending = []; self.quality = []
+        self._el_filt = StreamBandpass(self.cfg.sample_rate, *ERRP_BAND, self.cfg.n_channels)
+        self._el_spec = spec; self._el_qt = 0.0
+        self.mode = "errp_live"
+
+    def mark_live_event(self, label, t=None):
+        g = self.index_at(time.perf_counter() if t is None else t)
+        with self._lock:
+            self._el_pending.append((g, label))
+
+    def _do_errp_live(self, new, g_end):
+        fs = self.cfg.sample_rate
+        pre, post = int(round(-ERRP_TMIN * fs)), int(round(ERRP_TMAX * fs))
+        keep = int(self.EL_KEEP_S * fs)
+        y = self._el_filt.process(new) if new.shape[0] else None   # causal 1-10 Hz, as training
+        with self._lock:
+            if new.shape[0]:
+                self._el_buf = np.vstack([self._el_buf, new])[-keep:]
+                self._el_fbuf = np.vstack([self._el_fbuf, y])[-keep:]
+                self._el_gend = g_end
+            if self._el_gend is None:
+                return
+            raw, fbuf, total = self._el_buf, self._el_fbuf, self._el_gend
+            # causal filtering needs nothing after the epoch: classify as soon as it ends
+            ready = [ev for ev in self._el_pending if total >= ev[0] + post]
+            self._el_pending = [ev for ev in self._el_pending if total < ev[0] + post]
+        now = time.perf_counter()
+        if now - self._el_qt > 0.5 and raw.shape[0]:
+            self._el_qt = now
+            q = channel_status(raw[-fs:])
+            with self._lock:
+                self.quality = q
+        start = total - fbuf.shape[0]                                   # global index of fbuf[0]
+        for g, label in ready:
+            if g - pre < start:                                         # epoch already scrolled out
+                self.events.put(("errp_result", label, None, [])); continue
+            # baseline-corrected -0.2..+0.8 s epoch from the filtered stream: same as training
+            eps = epoch_signal(fbuf, fs, [g - start], ERRP_TMIN, ERRP_TMAX, baseline=(ERRP_TMIN, 0.0))
+            if not eps:
+                self.events.put(("errp_result", label, None, [])); continue
+            try:
+                p = float(self._el_spec["model"].proba_error([eps[0][:, self._el_spec["cols"]]])[0])
+            except Exception:
+                p = None
+            seg = raw[g - pre - start:g + post - start]
+            self.events.put(("errp_result", label, p, dead_channels(seg, self.cfg.electrode_names)))
 
     def finish_errp(self):
         with self._lock:
             sig = np.vstack(self._errp_sig) if self._errp_sig else np.zeros((0, self.cfg.n_channels))
             markers = list(self._errp_markers)
+            g0 = self._errp_g0 or 0
             self.mode = "idle"
         labels = ["none"] * sig.shape[0]
-        for idx, lab in markers:
+        for g, lab in markers:
+            idx = g - g0                                     # global -> recording position
             if 0 <= idx < len(labels):
                 labels[idx] = lab
         self.events.put(("recorded", sig, labels))
@@ -201,15 +335,21 @@ class EEGEngine:
     def _loop(self):
         while self._running:
             new = self.source.get_data() if self.source else np.zeros((0, self.cfg.n_channels))
-            if self.mode == "monitor":
+            g_end = self._clock_update(time.perf_counter(), new.shape[0])
+            mode = self.mode
+            if mode == "monitor":
                 self._do_monitor(new)
-            elif self.mode == "live":
+            elif mode == "live":
                 self._do_live(new)
-            elif self.mode == "record":
+            elif mode == "errp_live":
+                self._do_errp_live(new, g_end)
+            elif mode == "record":
                 self._do_record(new)
-            elif self.mode == "errp":
+            elif mode == "errp":
                 if new.shape[0]:
                     with self._lock:
+                        if self._errp_g0 is None:
+                            self._errp_g0 = g_end - new.shape[0]
                         self._errp_sig.append(new.copy())
                         self._errp_total += new.shape[0]
             time.sleep(0.005)
@@ -275,19 +415,23 @@ class EEGTab(ttk.Frame):
         self._cue_deadline = None      # GUI-side countdown for the record cue
 
         nb = ttk.Notebook(self); nb.grid(sticky="nsew")
+        self._nb = nb
         self.t_cfg = ttk.Frame(nb, padding=8)
         self.t_mon = ttk.Frame(nb, padding=8)
         self.t_rec = ttk.Frame(nb, padding=8)
         self.t_live = ttk.Frame(nb, padding=8)
+        self.t_errp = ttk.Frame(nb, padding=8)
         nb.add(self.t_cfg, text="  Config  ")
         nb.add(self.t_mon, text="  Monitor  ")
         nb.add(self.t_rec, text="  Record  ")
         nb.add(self.t_live, text="  Live  ")
+        nb.add(self.t_errp, text="  ErrP Live  ")
         nb.bind("<<NotebookTabChanged>>", lambda e: self._on_tab())
         self._build_config()
         self._build_monitor()
         self._build_record()
         self._build_live()
+        self._build_errp_live()
         self.after(60, self._tick)
 
     def _load_cfg(self) -> Config:
@@ -584,28 +728,28 @@ class EEGTab(ttk.Frame):
             self.errp_frame.grid_remove(); self.mi_frame.grid()
 
     # ----- big cue rendering (subject-facing) -----
-    def _cue_dims(self):
-        cv = self.cue_canvas
+    def _cue_dims(self, cv=None):
+        cv = cv if cv is not None else self.cue_canvas
         w = cv.winfo_width();  w = w if w > 1 else 640
         h = cv.winfo_height(); h = h if h > 1 else 420
         return cv, w, h
 
-    def _cue_idle(self):
-        cv, w, h = self._cue_dims(); cv.delete("all")
+    def _cue_idle(self, cv=None):
+        cv, w, h = self._cue_dims(cv); cv.delete("all")
         cv.create_text(w / 2, h / 2, text="+", fill="#555", font=("", max(24, int(h * 0.16)), "bold"))
 
-    def _cue_fixation(self):
-        cv, w, h = self._cue_dims(); cv.delete("all")
+    def _cue_fixation(self, cv=None):
+        cv, w, h = self._cue_dims(cv); cv.delete("all")
         cv.create_text(w / 2, h / 2, text="+", fill="#ddd", font=("", max(30, int(h * 0.22)), "bold"))
 
-    def _cue_text(self, text, color="#eee", sub=""):
-        cv, w, h = self._cue_dims(); cv.delete("all")
+    def _cue_text(self, text, color="#eee", sub="", cv=None):
+        cv, w, h = self._cue_dims(cv); cv.delete("all")
         cv.create_text(w / 2, h / 2, text=text, fill=color, font=("", max(24, int(h * 0.16)), "bold"))
         if sub:
             cv.create_text(w / 2, h * 0.85, text=sub, fill="#888", font=("", max(10, int(h * 0.05))))
 
-    def _cue_arrow(self, direction, color, label="", sub=""):
-        cv, w, h = self._cue_dims(); cv.delete("all")
+    def _cue_arrow(self, direction, color, label="", sub="", cv=None):
+        cv, w, h = self._cue_dims(cv); cv.delete("all")
         cy = h * 0.45; ah = h * 0.16
         if direction == "left":
             cv.create_polygon(w * 0.58, cy - ah, w * 0.58, cy + ah, w * 0.34, cy, fill=color, width=0)
@@ -656,38 +800,61 @@ class EEGTab(ttk.Frame):
         self.rec_status.config(text=f"Recording MI — {reps} each of rest, {', '.join(classes)} "
                                     "in random order. Follow the cue.")
 
-    # ----- ErrP cued feedback task (uses the same big cue canvas) -----
+    # ----- ErrP cued feedback task (shared by Record and the ErrP Live test) -----
     def _record_errp(self):
         self.cfg.paradigm = "errp"; self.cfg.labels = ["correct", "error"]
-        self._errp_n = int(self.v_trials.get())
-        self._errp_left = self._errp_n
-        self._errp_rate = float(self.v_errrate.get())
         self._cue_deadline = None            # ErrP is fast/event-locked: no countdown
         self.engine.start_errp()
-        self.rec_status.config(text=f"ErrP task: 0/{self._errp_n}")
-        self.after(500, self._errp_next)
+        self._errp_task_start(
+            int(self.v_trials.get()), float(self.v_errrate.get()), self.cue_canvas,
+            on_event=lambda lab, ts: self.engine.mark_event(lab, ts),
+            on_done=lambda: self.engine.finish_errp(),
+            on_progress=lambda k, n: self.rec_status.config(text=f"ErrP task: {k}/{n}"),
+            lead_ms=3000)       # same lead-in as ErrP Live: the causal filter settles first
 
-    def _errp_next(self):
-        if self._errp_left <= 0:
-            self.engine.finish_errp(); self._cue_text("done", color="#888")
+    def _errp_task_start(self, n, rate, cv, on_event, on_done, on_progress, lead_ms=500):
+        """Run n trials: fixation -> target arrow -> outcome arrow (wrong at ``rate``).
+        ``on_event(label)`` fires at each outcome onset - the instant the ErrP is time-locked to."""
+        self._errp_token = getattr(self, "_errp_token", 0) + 1
+        self._errp_t = {"n": n, "left": n, "rate": rate, "cv": cv, "target": None,
+                        "on_event": on_event, "on_done": on_done, "on_progress": on_progress}
+        on_progress(0, n)
+        self.after(lead_ms, self._errp_next, self._errp_token)
+
+    def _errp_abort(self):
+        self._errp_token = getattr(self, "_errp_token", 0) + 1     # orphans pending callbacks
+
+    def _errp_next(self, token):
+        if token != self._errp_token:
             return
-        self._cue_fixation()
-        self.after(700 + random.randint(0, 400), self._errp_cue)
+        t = self._errp_t
+        if t["left"] <= 0:
+            self._cue_text("done", color="#888", cv=t["cv"]); t["on_done"]()
+            return
+        self._cue_fixation(cv=t["cv"])
+        self.after(700 + random.randint(0, 400), self._errp_cue, token)
 
-    def _errp_cue(self):
-        self._errp_target = random.choice(["left", "right"])
-        self._cue_arrow(self._errp_target, "#4a90d9", "TARGET")
-        self.after(900, self._errp_outcome)
+    def _errp_cue(self, token):
+        if token != self._errp_token:
+            return
+        t = self._errp_t
+        t["target"] = random.choice(["left", "right"])
+        self._cue_arrow(t["target"], "#4a90d9", "TARGET", cv=t["cv"])
+        self.after(900, self._errp_outcome, token)
 
-    def _errp_outcome(self):
-        is_err = random.random() < self._errp_rate
-        outcome = ("right" if self._errp_target == "left" else "left") if is_err else self._errp_target
-        self.engine.mark_event("error" if is_err else "correct")
+    def _errp_outcome(self, token):
+        if token != self._errp_token:
+            return
+        t = self._errp_t
+        is_err = random.random() < t["rate"]
+        outcome = ("right" if t["target"] == "left" else "left") if is_err else t["target"]
         self._cue_arrow(outcome, "#e74c3c" if is_err else "#2ecc40",
-                        "WRONG" if is_err else "OK")
-        self._errp_left -= 1
-        self.rec_status.config(text=f"ErrP task: {self._errp_n - self._errp_left}/{self._errp_n}")
-        self.after(1000, self._errp_next)
+                        "WRONG" if is_err else "OK", cv=t["cv"])
+        t["cv"].update_idletasks()               # paint the outcome now, then timestamp its onset
+        t["on_event"]("error" if is_err else "correct", time.perf_counter())
+        t["left"] -= 1
+        t["on_progress"](t["n"] - t["left"], t["n"])
+        self.after(1000, self._errp_next, token)
 
     # ---------- live (run trained models on the stream) ----------
     def _build_live(self):
@@ -729,6 +896,39 @@ class EEGTab(ttk.Frame):
             self.live_list.insert(tk.END,
                 f"[{m.paradigm or m.model_type}] {e['folder'].name}   ({', '.join(m.labels)})")
 
+    @staticmethod
+    def _delay_info(lat):
+        """(short readout, warning or None) from EEGEngine.latency_stats()."""
+        if not lat:
+            return "", None
+        txt = f"data delay typ {lat['typ']:.0f} / max {lat['max']:.0f} ms"
+        warn = None
+        if lat["p95"] > 50:
+            warn = (f"Data arriving in bursts (up to {lat['max']:.0f} ms late). On Windows set the "
+                    "dongle's FTDI latency timer to 1 ms (see README).")
+        return txt, warn
+
+    def _warn_old_filter(self, meta, name):
+        if (meta.metrics or {}).get("filter") != "causal":
+            messagebox.showwarning(
+                "Retrain recommended",
+                f"{name} was trained before the switch to causal filtering, so live results won't "
+                "match its training scores. Retrain it on the Train tab (same recordings).")
+
+    def _model_cols(self, meta, name):
+        """Columns of the model's electrodes in the current stream (model order), or None after
+        telling the user which electrodes the current montage is missing."""
+        cur = self.cfg.electrode_names
+        data_ch = sorted((c for c in meta.channels if c.role == "data"), key=lambda c: c.channel)
+        model_elecs = [c.electrode for c in data_ch]
+        missing = [n for n in model_elecs if n not in cur]
+        if missing:
+            messagebox.showerror("Electrode mismatch",
+                f"{name} needs {missing}, not in the current montage {cur}.\n"
+                "Load a matching config/profile first.")
+            return None
+        return [cur.index(n) for n in model_elecs]
+
     def _toggle_live(self):
         if self.engine.mode == "live":
             self.engine.go_idle()
@@ -742,26 +942,23 @@ class EEGTab(ttk.Frame):
         for i in sel:
             e = self._eeg_models[i]
             model, meta = models.load_model(e["folder"])
+            self._warn_old_filter(meta, e["folder"].name)
             paradigm = (meta.paradigm or getattr(model, "kind", "")).lower()
             if paradigm not in LIVE_PARADIGMS:
                 skipped.append(f"{e['folder'].name} ({paradigm or '?'})"); continue
-            data_ch = sorted((c for c in meta.channels if c.role == "data"), key=lambda c: c.channel)
-            model_elecs = [c.electrode for c in data_ch]
-            missing = [n for n in model_elecs if n not in cur]
-            if missing:
-                messagebox.showerror("Electrode mismatch",
-                    f"{e['folder'].name} needs {missing}, not in the current montage {cur}.\n"
-                    "Load a matching config/profile first."); return
+            cols = self._model_cols(meta, e["folder"].name)
+            if cols is None:
+                return
             band, tag = LIVE_PARADIGMS[paradigm]
             win = max(1, round(self.cfg.sample_rate * (meta.window_ms or self.cfg.window_ms) / 1000))
             specs.append({"model": model, "labels": list(meta.labels),
-                          "cols": [cur.index(n) for n in model_elecs], "band": band,
+                          "cols": cols, "band": band,
                           "win": win, "tag": tag, "name": e["folder"].name,
                           "proba": None, "top": -1})
         if not specs:
             messagebox.showinfo("Nothing to run",
                 "Selected models can't run continuously — ErrP is event-locked "
-                "(use the Record feedback task).\nSkipped: " + ", ".join(skipped)); return
+                "(test it on the ErrP Live tab).\nSkipped: " + ", ".join(skipped)); return
         try:
             self.engine.start(); self.engine.start_live(specs)
         except Exception as ex:
@@ -799,7 +996,200 @@ class EEGTab(ttk.Frame):
                 p["active"].config(text=f"→ {labels[top]}   {proba[top]*100:0.0f}%")
                 parts.append(f"{p['spec']['tag']}={labels[top]}")
         self.live_decision.config(text="DECISION:  " + ("      ".join(parts) if parts else "-"))
-        self.live_lat.config(text=f"{lat:0.1f} ms")
+        dtxt, dwarn = self._delay_info(self.engine.latency_stats())
+        self.live_lat.config(text=f"compute {lat:0.1f} ms" + (f"  \u00b7  {dtxt}" if dtxt else ""),
+                             foreground="#b9770e" if dwarn else "#555")
+
+    # ---------- ErrP Live (test a trained ErrP model on live data) ----------
+    def _build_errp_live(self):
+        t = self.t_errp
+        t.columnconfigure(1, weight=1); t.rowconfigure(0, weight=1)
+        left = ttk.Frame(t); left.grid(row=0, column=0, sticky="nsw", padx=(0, 12))
+        left.rowconfigure(12, weight=1)
+        ttk.Label(left, text="Test a trained ErrP model on live EEG. The feedback task runs on the "
+                            "right; each outcome is classified from the live stream and scored "
+                            "against what was actually shown.",
+                  foreground="#555", wraplength=330, justify="left").grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        ttk.Label(left, text="Model").grid(row=1, column=0, sticky="e", padx=4)
+        self.el_model = ttk.Combobox(left, state="readonly", width=38)
+        self.el_model.grid(row=1, column=1, sticky="w")
+        ttk.Button(left, text="refresh", command=self._el_refresh).grid(
+            row=2, column=1, sticky="w", pady=(2, 6))
+        ttk.Label(left, text="Trials").grid(row=3, column=0, sticky="e", padx=4)
+        self.el_trials = ttk.Spinbox(left, from_=10, to=400, width=6); self.el_trials.set(40)
+        self.el_trials.grid(row=3, column=1, sticky="w")
+        ttk.Label(left, text="Error rate").grid(row=4, column=0, sticky="e", padx=4)
+        self.el_rate = ttk.Spinbox(left, from_=0.1, to=0.5, increment=0.05, width=6)
+        self.el_rate.set(0.30); self.el_rate.grid(row=4, column=1, sticky="w")
+        ttk.Label(left, text="Threshold").grid(row=5, column=0, sticky="e", padx=4)
+        self.el_thr = ttk.Spinbox(left, from_=0.05, to=0.95, increment=0.05, width=6,
+                                  command=self._el_render)
+        self.el_thr.set(0.50); self.el_thr.grid(row=5, column=1, sticky="w")
+        self.el_thr.bind("<KeyRelease>", lambda e: self._el_render())   # re-scores every trial
+        self.el_btn = ttk.Button(left, text="▶ Start test", command=self._el_toggle)
+        self.el_btn.grid(row=6, column=0, sticky="w", pady=8)
+        self.el_delay = ttk.Label(left, text="", foreground="#555")
+        self.el_delay.grid(row=6, column=1, sticky="w", padx=8)
+        self.el_status = ttk.Label(left, text="", foreground="#555")
+        self.el_status.grid(row=7, column=0, columnspan=2, sticky="w")
+        self.el_quality = ttk.Label(left, text="", foreground="#c0392b", wraplength=330,
+                                    font=("", 9, "bold"))
+        self.el_quality.grid(row=8, column=0, columnspan=2, sticky="w")
+        self.el_last = ttk.Label(left, text="last trial: -", font=("", 11, "bold"))
+        self.el_last.grid(row=9, column=0, columnspan=2, sticky="w", pady=(8, 2))
+        self.el_bar = tk.Canvas(left, height=18, width=320, bg="#eee", highlightthickness=1,
+                                highlightbackground="#ccc")
+        self.el_bar.grid(row=10, column=0, columnspan=2, sticky="w")
+        self.el_stats = ttk.Label(left, text="", font=("Consolas", 9), justify="left")
+        self.el_stats.grid(row=11, column=0, columnspan=2, sticky="w", pady=(8, 4))
+        self.el_log = tk.Listbox(left, height=10, width=50, font=("Consolas", 9),
+                                 exportselection=False)
+        self.el_log.grid(row=12, column=0, columnspan=2, sticky="nsew")
+        cue = ttk.LabelFrame(t, text="Cue — watch here; react naturally to wrong outcomes, "
+                                    "but don’t move", padding=2)
+        cue.grid(row=0, column=1, sticky="nsew")
+        cue.columnconfigure(0, weight=1); cue.rowconfigure(0, weight=1)
+        self.el_canvas = tk.Canvas(cue, bg="#111", highlightthickness=0)
+        self.el_canvas.grid(row=0, column=0, sticky="nsew")
+        self.el_canvas.bind("<Configure>", lambda e: self._cue_idle(self.el_canvas))
+        self._el_res = []          # (shown_label, p_error or None, dead_channels)
+        self._el_models = []
+        self._el_run = 0
+        self._el_refresh()
+        self._el_render()
+
+    def _el_refresh(self):
+        self._el_models = [e for e in models.list_models("eeg")
+                           if (e["meta"].paradigm or e["meta"].model_type) == "errp"]
+        names = [e["folder"].name for e in self._el_models]
+        self.el_model["values"] = names
+        if names:
+            self.el_model.current(0)
+        else:
+            self.el_model.set("")
+        self.el_status.config(text="" if names else
+                              "No ErrP models yet — train one (Train → EEG → ErrP).")
+
+    def _el_toggle(self):
+        if self.engine.mode == "errp_live":
+            self._el_stop("stopped"); return
+        if self.engine.mode in ("record", "errp"):
+            messagebox.showinfo("Busy", "A recording is in progress — wait for it to finish.")
+            return
+        sel = self.el_model.current()
+        if sel < 0 or sel >= len(self._el_models):
+            messagebox.showinfo("No model", "Train an ErrP model first (Train → EEG → ErrP).")
+            return
+        e = self._el_models[sel]
+        try:
+            model, meta = models.load_model(e["folder"])
+        except Exception as ex:
+            messagebox.showerror("Model error", str(ex)); return
+        self._warn_old_filter(meta, e["folder"].name)
+        cols = self._model_cols(meta, e["folder"].name)
+        if cols is None:
+            return
+        try:
+            self.engine.start(); self.engine.start_errp_live({"model": model, "cols": cols})
+        except Exception as ex:
+            messagebox.showerror("Source error", str(ex)); return
+        self._el_run += 1
+        rid = self._el_run
+        self._el_res = []; self.el_quality.config(text=""); self._el_render()
+        self.el_btn.config(text="■ Stop test")
+        self._cue_text("get ready", color="#888", cv=self.el_canvas)
+        self._errp_task_start(
+            int(self.el_trials.get()), float(self.el_rate.get()), self.el_canvas,
+            on_event=lambda lab, ts: self.engine.mark_live_event(lab, ts),
+            # the last outcome needs ~1.8 s more EEG before it can be classified
+            on_done=lambda: self.after(1500, lambda: self._el_finish(rid)),
+            on_progress=lambda k, n: self.el_status.config(text=f"trial {k}/{n}",
+                                                           foreground="#555"),
+            lead_ms=3000)       # buffer EEG first so even trial 1 has filter context
+
+    def _el_finish(self, rid):
+        if rid == self._el_run and self.engine.mode == "errp_live":
+            n = sum(1 for r in self._el_res if r[1] is not None)
+            self._el_stop(f"done — {n} trials scored")
+
+    def _el_stop(self, why):
+        self._errp_abort()
+        if self.engine.mode == "errp_live":
+            self.engine.go_idle()
+        self.el_btn.config(text="▶ Start test")
+        self.el_status.config(text=why, foreground="#555")
+        if not why.startswith("done"):
+            self._cue_idle(self.el_canvas)
+
+    def _el_on_result(self, label, p, dead):
+        self._el_res.append((label, p, list(dead)))
+        self._el_render()
+
+    def _el_thr_value(self):
+        try:
+            return min(0.99, max(0.01, float(self.el_thr.get())))
+        except ValueError:
+            return 0.5
+
+    def _el_render(self):
+        """Score every trial at the current threshold: stats, confusion matrix, log, last bar."""
+        thr = self._el_thr_value()
+        scored = [(lab, p) for lab, p, _ in self._el_res if p is not None]
+        tp = sum(lab == "error" and p >= thr for lab, p in scored)
+        fn = sum(lab == "error" and p < thr for lab, p in scored)
+        tn = sum(lab == "correct" and p < thr for lab, p in scored)
+        fp = sum(lab == "correct" and p >= thr for lab, p in scored)
+        n = len(scored)
+        rec_e = tp / (tp + fn) if tp + fn else None
+        rec_c = tn / (tn + fp) if tn + fp else None
+        recalls = [r for r in (rec_e, rec_c) if r is not None]
+        bal = float(np.mean(recalls)) if recalls else None
+        acc = (tp + tn) / n if n else None
+        skipped = len(self._el_res) - n
+
+        def frac(a, b):
+            return f"{a}/{b} ({a / b:.2f})" if b else f"{a}/{b}"
+        lines = [f"scored trials  {n}" + (f"   (skipped {skipped})" if skipped else ""),
+                 "accuracy       " + (f"{acc:.2f}" if acc is not None else "-"),
+                 "balanced acc   " + (f"{bal:.2f}   (chance 0.50)" if bal is not None else "-"),
+                 f"errors caught  {frac(tp, tp + fn)}",
+                 f"false alarms   {frac(fp, fp + tn)}",
+                 "",
+                 "                pred CORRECT  pred ERROR",
+                 f"shown CORRECT   {tn:12d}  {fp:10d}",
+                 f"shown ERROR     {fn:12d}  {tp:10d}"]
+        self.el_stats.config(text="\n".join(lines))
+
+        self.el_log.delete(0, tk.END)                       # newest first
+        for k in range(len(self._el_res) - 1, -1, -1):
+            lab, p, dead = self._el_res[k]
+            if p is None:
+                self.el_log.insert(tk.END, f"#{k + 1:<3} shown {lab.upper():7s}  skipped (no data)")
+                self.el_log.itemconfig(tk.END, foreground="#888")
+                continue
+            pred = "error" if p >= thr else "correct"
+            ok = pred == lab
+            note = "  dead ch!" if dead else ""
+            self.el_log.insert(tk.END, f"#{k + 1:<3} shown {lab.upper():7s}  P(err) {p:.2f}  "
+                                       f"-> {pred.upper():7s} {'ok' if ok else 'MISS'}{note}")
+            self.el_log.itemconfig(tk.END, foreground="#1e8449" if ok else "#c0392b")
+
+        cv = self.el_bar; cv.delete("all")
+        W = cv.winfo_width() if cv.winfo_width() > 1 else 320
+        last = next(((lab, p) for lab, p, _ in reversed(self._el_res) if p is not None), None)
+        if last:
+            lab, p = last
+            pred = "error" if p >= thr else "correct"
+            cv.create_rectangle(0, 0, int(W * p), 18, width=0,
+                                fill="#e74c3c" if p >= thr else "#2ecc40")
+            self.el_last.config(text=f"last: shown {lab.upper()}  →  P(error) {p:.2f}  "
+                                     f"({'ok' if pred == lab else 'MISS'})",
+                                foreground="#1e8449" if pred == lab else "#c0392b")
+        else:
+            self.el_last.config(text="last trial: -", foreground="#333")
+        x = int(W * thr)
+        cv.create_line(x, 0, x, 18, fill="#333", width=2)
 
     # ---------- shared ----------
     def _on_tab(self):
@@ -808,6 +1198,10 @@ class EEGTab(ttk.Frame):
             self.mon_btn.config(text="▶ Start"); self.mon_status.config(text="stopped", foreground="#a00")
             if hasattr(self, "live_btn"):
                 self.live_btn.config(text="▶ Start"); self.live_status.config(text="stopped", foreground="#a00")
+        # Tk also fires this event when the window first maps, so only stop the ErrP test when
+        # its tab really is no longer the selected one
+        if self.engine.mode == "errp_live" and self._nb.select() != str(self.t_errp):
+            self._el_stop("stopped (left the tab)")
 
     def _tick(self):
         try:
@@ -820,8 +1214,21 @@ class EEGTab(ttk.Frame):
                 elif kind == "recorded":
                     self._cue_deadline = None; self._cue_idle()
                     self._on_recorded(rest[0], rest[1])
+                elif kind == "errp_result":
+                    self._el_on_result(rest[0], rest[1], rest[2])
         except queue.Empty:
             pass
+        if self.engine.mode == "errp_live":             # dead electrodes make the test meaningless
+            with self.engine._lock:
+                q = list(self.engine.quality)
+            dead = [n for n, s in zip(self.cfg.electrode_names, q) if s in ("railed", "flat")]
+            dtxt, dwarn = self._delay_info(self.engine.latency_stats())
+            self.el_delay.config(text=dtxt)
+            if not dead and dwarn:
+                self.el_quality.config(text=dwarn)
+            else:
+                self.el_quality.config(text=(f"No signal (railed/flat): {', '.join(dead)} — results "
+                                         "are meaningless; fix contact." if dead else ""))
         # inconspicuous MI countdown in the corner
         if self._cue_deadline is not None and self.engine.mode == "record":
             rem = self._cue_deadline - time.perf_counter()
@@ -846,7 +1253,8 @@ class EEGTab(ttk.Frame):
                 self.mon_quality.config(text=f"Near rail: {', '.join(near)} — reseat",
                                         foreground="#b9770e")
             else:
-                self.mon_quality.config(text="")
+                dwarn = self._delay_info(self.engine.latency_stats())[1]
+                self.mon_quality.config(text=dwarn or "", foreground="#b9770e")
             if bands:
                 for i in range(len(self.band_bars.rows)):
                     total = float(bb[i]) if i < len(bb) else 0.0
@@ -857,7 +1265,8 @@ class EEGTab(ttk.Frame):
                 f, psd = welch(win, fs=self.cfg.sample_rate, axis=0,
                                nperseg=int(min(win.shape[0], 256)))
                 self.waterfall.push(psd.mean(axis=1), f)
-            self.mon_sps.config(text=f"{sps:.0f} Sa/s")
+            dtxt = self._delay_info(self.engine.latency_stats())[0]
+            self.mon_sps.config(text=f"{sps:.0f} Sa/s" + (f"  \u00b7  {dtxt}" if dtxt else ""))
             thr = self.cfg.alpha_threshold
             aw = self.alpha_bar.winfo_width(); aw = aw if aw > 1 else 240
             ah = self.alpha_bar.winfo_height(); ah = ah if ah > 1 else 18

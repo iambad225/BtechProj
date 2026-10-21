@@ -43,8 +43,8 @@ electrodes:
 - channel: 2
   name: FC6
   role: data
-window_ms: 4000
-step_ms: 1000
+window_ms: 2000
+step_ms: 500
 transient_ms: 400
 labels: []
 model_type: lda

@@ -396,7 +396,9 @@ S += [P("4. Headset setup and signal quality (every session)", h1),
           "light, or a bright ~10 Hz column on the waterfall). Parietal alpha is weaker than "
           "occipital, so set Alpha thresh between your eyes-open and eyes-closed values.",
           "<b>Environment.</b> Upright and relaxed, screen at eye level ~60 cm; unplug the laptop "
-          "charger if possible; away from mains cables and motors; phone away; no gum."])]
+          "charger if possible; away from mains cables and motors; phone away; no gum.",
+          "<b>Dongle latency (Windows).</b> FTDI latency timer → 1 ms (Device Manager → "
+          "COM port → Port Settings → Advanced)."])]
 
 # 5 Rules
 S += [P("5. Recording rules (both models)", h1),
@@ -523,9 +525,10 @@ S += [P("7. Model 2 \u2014 Error-related potentials (correct / error)", h1),
         "on −0.2 to 0 s, split into 12 time bins and averaged per bin and channel (12 × 8 = 96 "
         "features), then classified by shrinkage LDA with balanced class priors — the standard "
         "single-trial ERP classifier [9]."),
-      P("<b>What to expect:</b> about 65–80% balanced accuracy in good setups. Outcomes are "
-        "time-stamped in software, so tens of milliseconds of display jitter blur the epochs; be "
-        "sceptical of high scores from few trials."),
+      P("<b>What to expect:</b> about 65–80% balanced accuracy in good setups. Each outcome is "
+        "time-stamped after it is painted and mapped to the EEG through the stream clock, so "
+        "buffering delays don’t shift it; a frame or two of display lag remains. Be sceptical "
+        "of high scores from few trials."),
       P("7.4 Settings", h2),
       P("Table 5 \u2014 ErrP settings in the GUI", tcap),
       table(["Tab", "Setting", "Recommended", "Options / range", "Notes"],
@@ -543,9 +546,9 @@ S += [P("7. Model 2 \u2014 Error-related potentials (correct / error)", h1),
               "ErrP uses fixed \u22120.2 to +0.8 s epochs."],
              ["Train", "Recordings", "2 or more runs, pooled", "Ctrl/Shift-click; Refresh",
               "Same pooling rule as MI."],
-             ["Live", "\u2014", "Not run continuously", "\u2014",
-              "ErrP is event-locked; it will be evaluated after each action once the control loop "
-              "is integrated."]],
+             ["ErrP Live", "Trials \u00b7 Error rate \u00b7 Threshold", "40 \u00b7 0.30 \u00b7 0.50",
+              "Threshold 0.05\u20130.95",
+              "Live test: same task, each outcome classified and scored; threshold re-scores all."]],
             [40, 76, 94, 96, W_CONTENT - 306], group_col=0),
       P("7.5 In the app", h2),
       *steps([
@@ -594,7 +597,12 @@ S += [P("9. Live use", h1),
           "The current Config montage must contain the model\u2019s electrodes (the preset guarantees "
           "this). The window comes from the model and the update rate from Config Step "
           "(minimum 150 ms).",
-          "ErrP models are skipped in Live because they are event-locked."])]
+          "A <b>data delay</b> readout (Monitor, Live, ErrP Live) shows how stale the newest sample "
+          "is and warns when data arrives in bursts; training and live use the same causal "
+          "filters, so live results match training exactly.",
+          "ErrP models are event-locked, so they are tested on the <b>ErrP Live</b> tab instead: it "
+          "runs the feedback task, classifies each outcome ~0.8 s after it is shown and scores it "
+          "against what was shown (accuracy, errors caught, false alarms, confusion matrix)."])]
 
 # 10 Cadence
 S += [P("10. Session cadence and pooling", h1),
@@ -633,20 +641,26 @@ S += [KeepTogether([
         "Evaluation is trial-grouped, class-stratified k-fold cross-validation with per-class "
         "precision, recall, F1 and support.",
         "Recordings carry a <i>trial</i> column; the subject is entered in the Record tab.",
+        "New ErrP Live tab: test a trained ErrP model on live EEG with per-trial scoring.",
+        "Causal filtering in training and live: live results match training exactly, and the ErrP "
+        "verdict arrives ~0.8 s after the outcome.",
+        "Outcomes are mapped to the EEG through a stream clock, immune to USB buffering bursts.",
         "Reference (SRB) and bias must be physically connected; the alpha check runs on P3/P4."]))])]
 
 # Appendix
 S += [P("Appendix A \u2014 Settings fixed in code (not in the GUI)", h1),
       P("Table 7 \u2014 Fixed processing and timing", tcap),
       table(["Item", "Value", "Where"],
-            [["MI band-pass", "8\u201330 Hz, zero-phase", "eeg_training.MI_BAND"],
+            [["MI band-pass", "8\u201330 Hz, causal (same filter live and in training)",
+              "eeg_training.MI_BAND"],
              ["CSP", "4 filters per CSP; one-vs-rest for 3 classes (12 features)", "eeg_models.MIModel"],
              ["Onset trim", "0.4 s at the start of each recorded MI block",
               "transient_ms in config/eeg.yaml (no GUI field)"],
              ["MI get-ready cue", "2 s, not recorded", "Record tab (MI)"],
              ["MI cue order", "Block-randomised: each class once per rep; no immediate repeats",
               "eeg_tab.mi_cue_order"],
-             ["ErrP band-pass", "1\u201310 Hz, zero-phase", "eeg_training.ERRP_BAND"],
+             ["ErrP band-pass", "1\u201310 Hz, causal (same filter live and in training)",
+              "eeg_training.ERRP_BAND"],
              ["ErrP epoch / baseline", "\u22120.2 to +0.8 s / \u22120.2 to 0 s", "ERRP_TMIN, ERRP_TMAX"],
              ["ErrP features", "12 time bins \u00d7 8 channels = 96", "eeg_models.ErrPModel"],
              ["ErrP classifier", "Shrinkage LDA, balanced priors", "eeg_models.ErrPModel"],
@@ -654,7 +668,11 @@ S += [P("Appendix A \u2014 Settings fixed in code (not in the GUI)", h1),
               "Record tab (ErrP)"],
              ["Cross-validation", "StratifiedGroupKFold, k = min(5, fewest trials in any class); "
               "final model refit on all data", "eeg_training._grouped_cv"],
-             ["Live MI", "Raw window \u2192 8\u201330 Hz \u2192 model; update every \u2265 150 ms",
+             ["Live MI", "Continuous causal 8\u201330 Hz filter \u2192 newest window \u2192 model; "
+              "update every \u2265 150 ms", "eeg_tab.EEGEngine"],
+             ["Event timing", "Outcome painted, then time-stamped and mapped to its sample via the "
+              "stream clock", "eeg_tab.EEGEngine.index_at"],
+             ["ErrP Live verdict", "As soon as the epoch ends (~0.8 s after the outcome)",
               "eeg_tab.EEGEngine"]],
             [100, 222, W_CONTENT - 322], bold_col=0)]
 

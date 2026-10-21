@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 import numpy as np
 import joblib
-from scipy.signal import butter, sosfiltfilt
+from scipy.signal import butter, sosfiltfilt, sosfilt, sosfilt_zi
 from sklearn.preprocessing import StandardScaler
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis as LDA
 from sklearn.svm import SVC
@@ -50,6 +50,37 @@ def bandpass(sig: np.ndarray, fs: float, lo: float, hi: float, order: int = 4) -
     if n <= 3 * (2 * order + 1):        # too short for filtfilt padding
         return sig - sig.mean(axis=0, keepdims=True)
     return sosfiltfilt(sos, sig, axis=0)
+
+
+class StreamBandpass:
+    """Causal (forward-only) Butterworth band-pass for a live stream, fed chunk by chunk.
+
+    Training runs the very same filter over each whole recording (``causal_bandpass``), so a live
+    window/epoch is processed exactly like its training counterpart and nothing waits on future
+    samples. The state starts in steady state for the first sample, so the Cyton's large DC
+    offset causes no start-up transient.
+    """
+
+    def __init__(self, fs: float, lo: float, hi: float, n_ch: int, order: int = 4):
+        nyq = fs / 2.0
+        self.sos = butter(order, [lo / nyq, min(hi, nyq * 0.99) / nyq], btype="band", output="sos")
+        self.n_ch = n_ch
+        self.zi = None
+
+    def process(self, x: np.ndarray) -> np.ndarray:
+        x = np.asarray(x, dtype=float)
+        if x.shape[0] == 0:
+            return np.zeros((0, self.n_ch))
+        if self.zi is None:
+            self.zi = sosfilt_zi(self.sos)[:, :, None] * x[0][None, None, :]
+        y, self.zi = sosfilt(self.sos, x, axis=0, zi=self.zi)
+        return y
+
+
+def causal_bandpass(sig: np.ndarray, fs: float, lo: float, hi: float, order: int = 4) -> np.ndarray:
+    """Causal band-pass of a whole recording - sample-for-sample what StreamBandpass gives live."""
+    sig = np.asarray(sig, dtype=float)
+    return StreamBandpass(fs, lo, hi, sig.shape[1] if sig.ndim == 2 else 1, order).process(sig)
 
 
 def epoch_signal(sig: np.ndarray, fs: float, onsets, tmin: float, tmax: float,

@@ -3,6 +3,7 @@ _DOCS/*
 !_DOCS/EEG_Paradigms_8channel_Analysis.pdf
 !_DOCS/ERD-ERS_MI_ErrP_Training_Methodology.pdf
 !_DOCS/source/
+!_DOCS/PROJECT_LOG.md
 
 # OpenBCI GUI application install (~510 MB of third-party binaries)
 /OpenBCI_GUI/

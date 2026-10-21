@@ -85,6 +85,19 @@ Each Config tab has a **Profile** bar (save/load named configurations under
   error vs correct events). Saved under `data/training/`.
 - **Live** — run a trained MI model on the stream; a probability bar per class
   (rest / left / right) with the top class highlighted (a `rest` prediction = gate closed).
+- **ErrP Live** — test a trained ErrP model on live EEG. ErrP is event-locked, so this runs the
+  same target/outcome feedback task as Record; at each outcome the −0.2…+0.8 s epoch is cut from
+  the continuously filtered stream (same causal 1–10 Hz filter and baseline as training) and
+  classified as soon as it ends (~0.8 s after the outcome), then scored against what was actually
+  shown: per-trial log, P(error) bar, running accuracy, errors caught, false alarms and a
+  confusion matrix. The threshold is adjustable and re-scores every trial.
+
+**Timing.** Each outcome is painted first, then time-stamped, and mapped to its EEG sample through
+a *stream clock* (the lower envelope of chunk arrival times against the 250 Hz sample index), so
+USB/serial buffering bursts don't shift the marker — in Record and ErrP Live alike. Monitor, Live
+and ErrP Live show a **data delay** readout (how stale the newest sample is) and warn when data
+arrives in bursts. Training and the live tabs use the **same causal filters**, so live results
+match training exactly; models trained before this change ask to be retrained.
 
 ### Train tab
 Pick the **modality**; for EEG choose the **paradigm** (`MI (rest/L/R)` or `ErrP`) and, for MI,
@@ -165,6 +178,10 @@ Live/inference captures go under `data/acquired/` instead of `data/training/`.
 - EEG default montage is the standard 8-ch layout (Fp1, Fp2, C3, C4, P7, P8, O1, O2); move a
   node in the selector to use, e.g., P3/P4 instead of P7/P8.
 - India mains → keep `notch_hz: 50`.
+- **Dongle latency (Windows):** the FTDI USB-serial driver buffers 16 ms by default and can make
+  data arrive in bursts. Set it to 1 ms: Device Manager → Ports (COM & LPT) → the dongle's COM
+  port → Properties → Port Settings → Advanced → *Latency Timer* = 1. The Monitor's data-delay
+  readout should then stay around 20 ms at worst.
 
 ---
 
