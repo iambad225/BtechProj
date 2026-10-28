@@ -537,8 +537,7 @@ S += [P("7. Model 2 \u2014 Error-related potentials (correct / error)", h1),
               "Runs the target/outcome task on the Cue display."],
              ["Record", "Trials", "100 per run", "20\u2013400", "About 3 s per trial."],
              ["Record", "Error rate", "0.30", "0.10\u20130.50 (step 0.05)",
-              "Share of deliberately wrong outcomes. 0.20\u20130.30: rarer errors evoke a stronger "
-              "response but give fewer error epochs."],
+              "Share of wrong outcomes; rarer errors evoke a stronger response, but fewer epochs."],
              ["Record", "Description", "Run notes", "Optional", "Saved in the recording\u2019s JSON."],
              ["Train", "Modality \u00b7 Paradigm", "EEG \u00b7 ErrP", "\u2014", "Lists only ErrP recordings."],
              ["Train", "Model", "\u2014 (hidden)", "Fixed", "Always shrinkage LDA."],
@@ -546,9 +545,9 @@ S += [P("7. Model 2 \u2014 Error-related potentials (correct / error)", h1),
               "ErrP uses fixed \u22120.2 to +0.8 s epochs."],
              ["Train", "Recordings", "2 or more runs, pooled", "Ctrl/Shift-click; Refresh",
               "Same pooling rule as MI."],
-             ["ErrP Live", "Trials \u00b7 Error rate \u00b7 Threshold", "40 \u00b7 0.30 \u00b7 0.50",
-              "Threshold 0.05\u20130.95",
-              "Live test: same task, each outcome classified and scored; threshold re-scores all."]],
+             ["ErrP Live", "Test \u00b7 Trials \u00b7 Error rate \u00b7 Threshold",
+              "Arrow \u00b7 40 \u00b7 0.30 \u00b7 0.50", "Arrow / Facts; threshold 0.05\u20130.95",
+              "Each outcome scored; threshold re-scores all. Facts: section 9."]],
             [40, 76, 94, 96, W_CONTENT - 306], group_col=0),
       P("7.5 In the app", h2),
       *steps([
@@ -602,7 +601,11 @@ S += [P("9. Live use", h1),
           "filters, so live results match training exactly.",
           "ErrP models are event-locked, so they are tested on the <b>ErrP Live</b> tab instead: it "
           "runs the feedback task, classifies each outcome ~0.8 s after it is shown and scores it "
-          "against what was shown (accuracy, errors caught, false alarms, confusion matrix)."])]
+          "against what was shown (accuracy, errors caught, false alarms, confusion matrix).",
+          "ErrP Live's <b>True / false facts</b> test shows easy statements (100 true, 100 false) "
+          "for <i>Fact time</i> (default 15 s, 2–60 s); every 0.1 s epoch is classified while one "
+          "is shown and its <i>Score</i> (peak or mean P(error)) is thresholded. Untick "
+          "<i>Show results</i> to hide the verdicts from the subject."])]
 
 # 10 Cadence
 S += [P("10. Session cadence and pooling", h1),

@@ -91,6 +91,16 @@ Each Config tab has a **Profile** bar (save/load named configurations under
   classified as soon as it ends (~0.8 s after the outcome), then scored against what was actually
   shown: per-trial log, P(error) bar, running accuracy, errors caught, false alarms and a
   confusion matrix. The threshold is adjustable and re-scores every trial.
+  - **Test** selector: *Arrow feedback* (above) or *True / false facts*: easy statements
+    (`core/errp_facts.py`, 100 true + 100 false, most false ones turning false on their last word)
+    shown one at a time for **Fact time** seconds (default 15), with a 2–2.5 s fixation gap.
+    *False share* sets the fraction of false statements. While a statement is up, the moment the
+    error is noticed isn't known, so every point is treated as a possible event: the −0.2…+0.8 s
+    epoch around it is classified every 0.1 s (live P(error) trace). The statement's **Score** is
+    the *peak* or *mean* of those values, thresholded like the arrow test (TRUE / FALSE rows in
+    the confusion matrix). True and false statements are drawn in the same colour.
+  - **Show results** toggle hides the verdict panel (last result, bar, trace, stats, log) so the
+    subject doesn't see HIT/MISS feedback mid-test; scoring carries on and reappears when ticked.
 
 **Timing.** Each outcome is painted first, then time-stamped, and mapped to its EEG sample through
 a *stream clock* (the lower envelope of chunk arrival times against the 250 Hz sample index), so

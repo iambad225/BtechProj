@@ -21,6 +21,7 @@ from core.montage import OCCIPITAL
 from core.eeg_models import StreamBandpass, epoch_signal
 from core.eeg_training import ERRP_BAND, ERRP_TMIN, ERRP_TMAX
 from core.quality import channel_status, dead_channels
+from core import errp_facts
 from sources import create_source
 from sources.synthetic_eeg import EEGSyntheticSource
 import storage.recordings as recordings
@@ -38,6 +39,8 @@ BAND_COLORS = {"delta": "#6c5ce7", "theta": "#0984e3", "alpha": "#e17055",
 # EEG paradigms that run continuously on a sliding window (band, short tag).
 # MI is now rest/left/right, so its own 'rest' class is the gate (no separate ERD model).
 LIVE_PARADIGMS = {"mi": ((8.0, 30.0), "MI")}
+# ErrP Live tests: the event-locked arrow task, or statements read for as long as they're shown
+EL_TESTS = ("Arrow feedback", "True / false facts")
 
 
 def mi_cue_order(classes, reps, rng=random):
@@ -264,15 +267,17 @@ class EEGEngine:
 
     # ----- live ErrP test -----
     EL_KEEP_S = 8.0                        # seconds of stream kept for epoching
+    SCAN_STEP_S = 0.1                      # facts test: spacing of the sliding epochs
 
     def start_errp_live(self, spec):
         """spec: {"model": ErrPModel, "cols": model electrode columns}. Outcomes are marked with
         mark_live_event(); each is classified once enough post-event data has arrived and the
-        result is posted as ("errp_result", label, p_error, dead_channels)."""
+        result is posted as ("errp_result", label, p_error, dead_channels). For the facts test,
+        begin_scan()/end_scan() bracket each statement instead (see there)."""
         with self._lock:
             self._el_buf = np.zeros((0, self.cfg.n_channels)); self._el_gend = None
             self._el_fbuf = np.zeros((0, self.cfg.n_channels))
-            self._el_pending = []; self.quality = []
+            self._el_pending = []; self._el_scans = []; self.quality = []
         self._el_filt = StreamBandpass(self.cfg.sample_rate, *ERRP_BAND, self.cfg.n_channels)
         self._el_spec = spec; self._el_qt = 0.0
         self.mode = "errp_live"
@@ -281,6 +286,23 @@ class EEGEngine:
         g = self.index_at(time.perf_counter() if t is None else t)
         with self._lock:
             self._el_pending.append((g, label))
+
+    def begin_scan(self, label, t=None):
+        """A statement appeared at PC time ``t``. Its onset is not one known instant (the error is
+        noticed while reading), so every point from here to end_scan() is treated as a possible
+        event: the -0.2..+0.8 s epoch around it is classified, every SCAN_STEP_S. Each score is
+        posted as ("errp_scan_p", p); when the statement is done, ("errp_scan", label, peak, mean,
+        n_epochs, dead_channels)."""
+        g = self.index_at(time.perf_counter() if t is None else t)
+        with self._lock:
+            self._el_scans.append({"label": label, "next": g, "g_off": None, "ps": [], "dead": set()})
+
+    def end_scan(self, t=None):
+        g = self.index_at(time.perf_counter() if t is None else t)
+        with self._lock:
+            for s in self._el_scans:
+                if s["g_off"] is None:
+                    s["g_off"] = g
 
     def _do_errp_live(self, new, g_end):
         fs = self.cfg.sample_rate
@@ -318,6 +340,43 @@ class EEGEngine:
                 p = None
             seg = raw[g - pre - start:g + post - start]
             self.events.put(("errp_result", label, p, dead_channels(seg, self.cfg.electrode_names)))
+        self._do_scans(raw, fbuf, start, total, pre, post)
+
+    def _do_scans(self, raw, fbuf, start, total, pre, post):
+        """Facts test: classify each due sliding epoch of every open statement."""
+        fs = self.cfg.sample_rate
+        step = max(1, int(round(self.SCAN_STEP_S * fs)))
+        with self._lock:
+            scans = list(self._el_scans)
+        done = []
+        for s in scans:
+            gs = []
+            while total >= s["next"] + post and (s["g_off"] is None or s["next"] <= s["g_off"]):
+                if s["next"] - pre >= start:                    # still inside the kept stream
+                    gs.append(s["next"])
+                s["next"] += step
+            if gs:
+                eps = epoch_signal(fbuf, fs, [g - start for g in gs], ERRP_TMIN, ERRP_TMAX,
+                                   baseline=(ERRP_TMIN, 0.0))
+                try:
+                    ps = [float(p) for p in self._el_spec["model"].proba_error(
+                        [ep[:, self._el_spec["cols"]] for ep in eps])] if eps else []
+                except Exception:
+                    ps = []
+                s["ps"] += ps
+                for p in ps:
+                    self.events.put(("errp_scan_p", p))
+                # same raw-sample check as the arrow test, over the span these epochs cover
+                seg = raw[max(0, gs[0] - pre - start):gs[-1] + post - start]
+                s["dead"].update(dead_channels(seg, self.cfg.electrode_names))
+            if s["g_off"] is not None and s["next"] > s["g_off"]:
+                done.append(s)
+                ps = s["ps"]
+                self.events.put(("errp_scan", s["label"], max(ps) if ps else None,
+                                 float(np.mean(ps)) if ps else None, len(ps), sorted(s["dead"])))
+        if done:
+            with self._lock:
+                self._el_scans = [s for s in self._el_scans if s not in done]
 
     def finish_errp(self):
         with self._lock:
@@ -1005,59 +1064,124 @@ class EEGTab(ttk.Frame):
         t = self.t_errp
         t.columnconfigure(1, weight=1); t.rowconfigure(0, weight=1)
         left = ttk.Frame(t); left.grid(row=0, column=0, sticky="nsw", padx=(0, 12))
-        left.rowconfigure(12, weight=1)
-        ttk.Label(left, text="Test a trained ErrP model on live EEG. The feedback task runs on the "
-                            "right; each outcome is classified from the live stream and scored "
-                            "against what was actually shown.",
-                  foreground="#555", wraplength=330, justify="left").grid(
-            row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        left.rowconfigure(13, weight=1)
+        self.el_help = ttk.Label(left, text="", foreground="#555", wraplength=330, justify="left")
+        self.el_help.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
         ttk.Label(left, text="Model").grid(row=1, column=0, sticky="e", padx=4)
         self.el_model = ttk.Combobox(left, state="readonly", width=38)
         self.el_model.grid(row=1, column=1, sticky="w")
         ttk.Button(left, text="refresh", command=self._el_refresh).grid(
             row=2, column=1, sticky="w", pady=(2, 6))
-        ttk.Label(left, text="Trials").grid(row=3, column=0, sticky="e", padx=4)
+        ttk.Label(left, text="Test").grid(row=3, column=0, sticky="e", padx=4)
+        self.v_el_test = tk.StringVar(value=EL_TESTS[0])
+        self.el_test = ttk.Combobox(left, textvariable=self.v_el_test, values=EL_TESTS,
+                                    state="readonly", width=22)
+        self.el_test.grid(row=3, column=1, sticky="w", pady=(0, 2))
+        self.el_test.bind("<<ComboboxSelected>>", lambda e: self._el_mode())
+        self.el_trials_lbl = ttk.Label(left, text="Trials")
+        self.el_trials_lbl.grid(row=4, column=0, sticky="e", padx=4)
         self.el_trials = ttk.Spinbox(left, from_=10, to=400, width=6); self.el_trials.set(40)
-        self.el_trials.grid(row=3, column=1, sticky="w")
-        ttk.Label(left, text="Error rate").grid(row=4, column=0, sticky="e", padx=4)
+        self.el_trials.grid(row=4, column=1, sticky="w")
+        self.el_rate_lbl = ttk.Label(left, text="Error rate")
+        self.el_rate_lbl.grid(row=5, column=0, sticky="e", padx=4)
         self.el_rate = ttk.Spinbox(left, from_=0.1, to=0.5, increment=0.05, width=6)
-        self.el_rate.set(0.30); self.el_rate.grid(row=4, column=1, sticky="w")
-        ttk.Label(left, text="Threshold").grid(row=5, column=0, sticky="e", padx=4)
+        self.el_rate.set(0.30); self.el_rate.grid(row=5, column=1, sticky="w")
+        # facts test only: how long each statement stays up, and how its scores are summarised
+        secs_lbl = ttk.Label(left, text="Fact time (s)")
+        secs_lbl.grid(row=6, column=0, sticky="e", padx=4)
+        self.el_secs = ttk.Spinbox(left, from_=2, to=60, increment=1, width=6); self.el_secs.set(15)
+        self.el_secs.grid(row=6, column=1, sticky="w")
+        score_lbl = ttk.Label(left, text="Score")
+        score_lbl.grid(row=7, column=0, sticky="e", padx=4)
+        self.v_el_score = tk.StringVar(value="peak")
+        score = ttk.Combobox(left, textvariable=self.v_el_score, values=("peak", "mean"),
+                             state="readonly", width=6)
+        score.grid(row=7, column=1, sticky="w")
+        score.bind("<<ComboboxSelected>>", lambda e: self._el_render())      # re-scores every fact
+        self._el_fact_widgets = [secs_lbl, self.el_secs, score_lbl, score]
+        ttk.Label(left, text="Threshold").grid(row=8, column=0, sticky="e", padx=4)
         self.el_thr = ttk.Spinbox(left, from_=0.05, to=0.95, increment=0.05, width=6,
                                   command=self._el_render)
-        self.el_thr.set(0.50); self.el_thr.grid(row=5, column=1, sticky="w")
+        self.el_thr.set(0.50); self.el_thr.grid(row=8, column=1, sticky="w")
         self.el_thr.bind("<KeyRelease>", lambda e: self._el_render())   # re-scores every trial
         self.el_btn = ttk.Button(left, text="▶ Start test", command=self._el_toggle)
-        self.el_btn.grid(row=6, column=0, sticky="w", pady=8)
+        self.el_btn.grid(row=9, column=0, sticky="w", pady=8)
         self.el_delay = ttk.Label(left, text="", foreground="#555")
-        self.el_delay.grid(row=6, column=1, sticky="w", padx=8)
+        self.el_delay.grid(row=9, column=1, sticky="w", padx=8)
         self.el_status = ttk.Label(left, text="", foreground="#555")
-        self.el_status.grid(row=7, column=0, columnspan=2, sticky="w")
+        self.el_status.grid(row=10, column=0, columnspan=2, sticky="w")
         self.el_quality = ttk.Label(left, text="", foreground="#c0392b", wraplength=330,
                                     font=("", 9, "bold"))
-        self.el_quality.grid(row=8, column=0, columnspan=2, sticky="w")
-        self.el_last = ttk.Label(left, text="last trial: -", font=("", 11, "bold"))
-        self.el_last.grid(row=9, column=0, columnspan=2, sticky="w", pady=(8, 2))
-        self.el_bar = tk.Canvas(left, height=18, width=320, bg="#eee", highlightthickness=1,
+        self.el_quality.grid(row=11, column=0, columnspan=2, sticky="w")
+        # the subject shouldn't see verdicts mid-test: a shown "MISS" is itself error feedback
+        self.v_el_show = tk.BooleanVar(value=True)
+        ttk.Checkbutton(left, text="Show results (untick while you are the subject)",
+                        variable=self.v_el_show, command=self._el_show_toggle).grid(
+            row=12, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        res = self.el_results = ttk.Frame(left)
+        res.grid(row=13, column=0, columnspan=2, sticky="nsew")
+        res.columnconfigure(0, weight=1); res.rowconfigure(4, weight=1)
+        self.el_last = ttk.Label(res, text="last trial: -", font=("", 11, "bold"))
+        self.el_last.grid(row=0, column=0, sticky="w", pady=(6, 2))
+        self.el_bar = tk.Canvas(res, height=18, width=320, bg="#eee", highlightthickness=1,
                                 highlightbackground="#ccc")
-        self.el_bar.grid(row=10, column=0, columnspan=2, sticky="w")
-        self.el_stats = ttk.Label(left, text="", font=("Consolas", 9), justify="left")
-        self.el_stats.grid(row=11, column=0, columnspan=2, sticky="w", pady=(8, 4))
-        self.el_log = tk.Listbox(left, height=10, width=50, font=("Consolas", 9),
+        self.el_bar.grid(row=1, column=0, sticky="w")
+        # facts test: P(error) of the statement on screen, one point per sliding epoch
+        self.el_trace = tk.Canvas(res, height=64, width=320, bg="#fafafa", highlightthickness=1,
+                                  highlightbackground="#ccc")
+        self.el_trace.grid(row=2, column=0, sticky="w", pady=(6, 0))
+        self.el_stats = ttk.Label(res, text="", font=("Consolas", 9), justify="left")
+        self.el_stats.grid(row=3, column=0, sticky="w", pady=(8, 4))
+        self.el_log = tk.Listbox(res, height=10, width=50, font=("Consolas", 9),
                                  exportselection=False)
-        self.el_log.grid(row=12, column=0, columnspan=2, sticky="nsew")
-        cue = ttk.LabelFrame(t, text="Cue — watch here; react naturally to wrong outcomes, "
-                                    "but don’t move", padding=2)
-        cue.grid(row=0, column=1, sticky="nsew")
-        cue.columnconfigure(0, weight=1); cue.rowconfigure(0, weight=1)
-        self.el_canvas = tk.Canvas(cue, bg="#111", highlightthickness=0)
+        self.el_log.grid(row=4, column=0, sticky="nsew")
+        xs = ttk.Scrollbar(res, orient="horizontal", command=self.el_log.xview)
+        xs.grid(row=5, column=0, sticky="ew")                       # statement text runs long
+        self.el_log.config(xscrollcommand=xs.set)
+        self.el_cue =ttk.LabelFrame(t, text="", padding=2)
+        self.el_cue.grid(row=0, column=1, sticky="nsew")
+        self.el_cue.columnconfigure(0, weight=1); self.el_cue.rowconfigure(0, weight=1)
+        self.el_canvas = tk.Canvas(self.el_cue, bg="#111", highlightthickness=0)
         self.el_canvas.grid(row=0, column=0, sticky="nsew")
         self.el_canvas.bind("<Configure>", lambda e: self._cue_idle(self.el_canvas))
-        self._el_res = []          # (shown_label, p_error or None, dead_channels)
+        self._el_res = []          # one dict per trial / statement (see _el_on_result, _el_on_scan)
+        self._el_kind = "arrow"    # test the results in _el_res came from
+        self._el_fact_q = deque()  # texts of statements whose scan result is still to come
+        self._el_trace_ps = []
         self._el_models = []
         self._el_run = 0
         self._el_refresh()
+        self._el_mode()
+
+    def _el_facts(self):
+        return self.v_el_test.get() == EL_TESTS[1]
+
+    def _el_mode(self):
+        facts = self._el_facts()
+        for w in self._el_fact_widgets + [self.el_trace]:
+            w.grid() if facts else w.grid_remove()
+        self.el_trials_lbl.config(text="Facts" if facts else "Trials")
+        self.el_rate_lbl.config(text="False share" if facts else "Error rate")
+        if facts:
+            self.el_help.config(text="Easy statements appear on the right, one at a time; about "
+                                     "'False share' of them are false. Read each silently. While "
+                                     "a statement is shown, the model scores the live EEG every "
+                                     "0.1 s; a statement counts as ERROR when its peak (or mean) "
+                                     "P(error) reaches the threshold.")
+            self.el_cue.config(text="Statements — read silently; don’t answer aloud or move")
+        else:
+            self.el_help.config(text="Test a trained ErrP model on live EEG. The feedback task runs "
+                                     "on the right; each outcome is classified from the live stream "
+                                     "and scored against what was actually shown.")
+            self.el_cue.config(text="Cue — watch here; react naturally to wrong outcomes, "
+                                    "but don’t move")
         self._el_render()
+
+    def _el_show_toggle(self):
+        if self.v_el_show.get():
+            self.el_results.grid(); self._el_render(); self._el_trace_draw()
+        else:
+            self.el_results.grid_remove()
 
     def _el_refresh(self):
         self._el_models = [e for e in models.list_models("eeg")
@@ -1096,9 +1220,27 @@ class EEGTab(ttk.Frame):
             messagebox.showerror("Source error", str(ex)); return
         self._el_run += 1
         rid = self._el_run
-        self._el_res = []; self.el_quality.config(text=""); self._el_render()
-        self.el_btn.config(text="■ Stop test")
+        facts = self._el_facts()
+        self._el_kind = "facts" if facts else "arrow"
+        self._el_res = []; self._el_fact_q.clear(); self._el_trace_reset()
+        self.el_quality.config(text=""); self._el_render()
+        self.el_btn.config(text="■ Stop test"); self.el_test.config(state="disabled")
         self._cue_text("get ready", color="#888", cv=self.el_canvas)
+        if facts:
+            try:
+                secs = min(60.0, max(2.0, float(self.el_secs.get())))
+            except ValueError:
+                secs = 15.0
+            self._facts_task_start(
+                int(self.el_trials.get()), float(self.el_rate.get()), secs, self.el_canvas,
+                on_start=self._el_fact_start,
+                on_end=lambda ts: self.engine.end_scan(ts),
+                # the last statement's final epochs need ~0.8 s more EEG before they're scored
+                on_done=lambda: self.after(1500, lambda: self._el_finish(rid)),
+                on_progress=lambda k, n: self.el_status.config(text=f"fact {k}/{n}",
+                                                               foreground="#555"),
+                lead_ms=3000)
+            return
         self._errp_task_start(
             int(self.el_trials.get()), float(self.el_rate.get()), self.el_canvas,
             on_event=lambda lab, ts: self.engine.mark_live_event(lab, ts),
@@ -1108,23 +1250,67 @@ class EEGTab(ttk.Frame):
                                                            foreground="#555"),
             lead_ms=3000)       # buffer EEG first so even trial 1 has filter context
 
+    def _el_fact_start(self, label, text, ts):
+        self._el_fact_q.append(text)
+        self._el_trace_reset()
+        self.engine.begin_scan(label, ts)
+
     def _el_finish(self, rid):
         if rid == self._el_run and self.engine.mode == "errp_live":
-            n = sum(1 for r in self._el_res if r[1] is not None)
-            self._el_stop(f"done — {n} trials scored")
+            n = sum(1 for r in self._el_res if self._el_score(r) is not None)
+            self._el_stop(f"done — {n} {'statements' if self._el_kind == 'facts' else 'trials'} scored")
 
     def _el_stop(self, why):
         self._errp_abort()
         if self.engine.mode == "errp_live":
             self.engine.go_idle()
-        self.el_btn.config(text="▶ Start test")
+        self.el_btn.config(text="▶ Start test"); self.el_test.config(state="readonly")
         self.el_status.config(text=why, foreground="#555")
         if not why.startswith("done"):
             self._cue_idle(self.el_canvas)
 
     def _el_on_result(self, label, p, dead):
-        self._el_res.append((label, p, list(dead)))
+        self._el_res.append({"label": label, "p": p, "dead": list(dead)})
         self._el_render()
+
+    def _el_on_scan(self, label, peak, mean, n, dead):
+        text = self._el_fact_q.popleft() if self._el_fact_q else ""
+        self._el_res.append({"label": label, "peak": peak, "mean": mean, "n": n,
+                             "dead": list(dead), "text": text})
+        self._el_render()
+
+    def _el_score(self, r):
+        """The number a trial is thresholded on: P(error) of the outcome epoch (arrow test), or
+        the peak / mean of a statement's sliding-epoch scores (facts test)."""
+        return r[self.v_el_score.get()] if "peak" in r else r["p"]
+
+    def _el_trace_reset(self):
+        self._el_trace_ps = []
+        self._el_trace_draw()
+
+    def _el_trace_add(self, p):
+        self._el_trace_ps.append(p)
+        if self.v_el_show.get():
+            self._el_trace_draw()
+
+    def _el_trace_draw(self):
+        cv = self.el_trace; cv.delete("all")
+        W = cv.winfo_width() if cv.winfo_width() > 1 else 320
+        H = cv.winfo_height() if cv.winfo_height() > 1 else 64
+        try:
+            secs = min(60.0, max(2.0, float(self.el_secs.get())))
+        except ValueError:
+            secs = 15.0
+        n_max = max(2, int(secs / EEGEngine.SCAN_STEP_S) + 1)
+        y_thr = H - 2 - (H - 4) * self._el_thr_value()
+        cv.create_line(0, y_thr, W, y_thr, fill="#999", dash=(3, 2))
+        cv.create_text(4, 2, text="P(error) now", anchor="nw", fill="#888", font=("", 8))
+        ps = self._el_trace_ps[-n_max:]
+        if len(ps) > 1:
+            pts = []
+            for i, p in enumerate(ps):
+                pts += [W * i / (n_max - 1), H - 2 - (H - 4) * p]
+            cv.create_line(*pts, fill="#c0392b", width=2)
 
     def _el_thr_value(self):
         try:
@@ -1135,7 +1321,10 @@ class EEGTab(ttk.Frame):
     def _el_render(self):
         """Score every trial at the current threshold: stats, confusion matrix, log, last bar."""
         thr = self._el_thr_value()
-        scored = [(lab, p) for lab, p, _ in self._el_res if p is not None]
+        facts = self._el_kind == "facts"
+        shown = {"correct": "TRUE", "error": "FALSE"} if facts else {"correct": "CORRECT", "error": "ERROR"}
+        scored = [(r["label"], self._el_score(r)) for r in self._el_res
+                  if self._el_score(r) is not None]
         tp = sum(lab == "error" and p >= thr for lab, p in scored)
         fn = sum(lab == "error" and p < thr for lab, p in scored)
         tn = sum(lab == "correct" and p < thr for lab, p in scored)
@@ -1150,46 +1339,107 @@ class EEGTab(ttk.Frame):
 
         def frac(a, b):
             return f"{a}/{b} ({a / b:.2f})" if b else f"{a}/{b}"
-        lines = [f"scored trials  {n}" + (f"   (skipped {skipped})" if skipped else ""),
-                 "accuracy       " + (f"{acc:.2f}" if acc is not None else "-"),
-                 "balanced acc   " + (f"{bal:.2f}   (chance 0.50)" if bal is not None else "-"),
-                 f"errors caught  {frac(tp, tp + fn)}",
-                 f"false alarms   {frac(fp, fp + tn)}",
+        rows = [("scored " + ("statements" if facts else "trials"),
+                 f"{n}" + (f"   (skipped {skipped})" if skipped else "")),
+                ("accuracy", f"{acc:.2f}" if acc is not None else "-"),
+                ("balanced acc", f"{bal:.2f}   (chance 0.50)" if bal is not None else "-"),
+                ("false caught" if facts else "errors caught", frac(tp, tp + fn)),
+                ("true flagged" if facts else "false alarms", frac(fp, fp + tn))]
+        lines = [f"{k:<18s}{v}" for k, v in rows] + [
                  "",
-                 "                pred CORRECT  pred ERROR",
-                 f"shown CORRECT   {tn:12d}  {fp:10d}",
-                 f"shown ERROR     {fn:12d}  {tp:10d}"]
+                 "                 pred CORRECT  pred ERROR",
+                 f"shown {shown['correct']:10s} {tn:12d}  {fp:10d}",
+                 f"shown {shown['error']:10s} {fn:12d}  {tp:10d}"]
         self.el_stats.config(text="\n".join(lines))
 
         self.el_log.delete(0, tk.END)                       # newest first
         for k in range(len(self._el_res) - 1, -1, -1):
-            lab, p, dead = self._el_res[k]
+            r = self._el_res[k]
+            lab, p = r["label"], self._el_score(r)
             if p is None:
-                self.el_log.insert(tk.END, f"#{k + 1:<3} shown {lab.upper():7s}  skipped (no data)")
+                self.el_log.insert(tk.END, f"#{k + 1:<3} shown {shown[lab]:7s}  skipped (no data)")
                 self.el_log.itemconfig(tk.END, foreground="#888")
                 continue
             pred = "error" if p >= thr else "correct"
             ok = pred == lab
-            note = "  dead ch!" if dead else ""
-            self.el_log.insert(tk.END, f"#{k + 1:<3} shown {lab.upper():7s}  P(err) {p:.2f}  "
-                                       f"-> {pred.upper():7s} {'ok' if ok else 'MISS'}{note}")
+            note = "  dead ch!" if r["dead"] else ""
+            if facts:
+                line = (f"#{k + 1:<3} {shown[lab]:5s} peak {r['peak']:.2f} mean {r['mean']:.2f} "
+                        f"-> {pred.upper():7s} {'ok' if ok else 'MISS'}{note}  {r['text']}")
+            else:
+                line = (f"#{k + 1:<3} shown {lab.upper():7s}  P(err) {p:.2f}  "
+                        f"-> {pred.upper():7s} {'ok' if ok else 'MISS'}{note}")
+            self.el_log.insert(tk.END, line)
             self.el_log.itemconfig(tk.END, foreground="#1e8449" if ok else "#c0392b")
 
         cv = self.el_bar; cv.delete("all")
         W = cv.winfo_width() if cv.winfo_width() > 1 else 320
-        last = next(((lab, p) for lab, p, _ in reversed(self._el_res) if p is not None), None)
+        last = next(((r["label"], self._el_score(r)) for r in reversed(self._el_res)
+                     if self._el_score(r) is not None), None)
         if last:
             lab, p = last
             pred = "error" if p >= thr else "correct"
             cv.create_rectangle(0, 0, int(W * p), 18, width=0,
                                 fill="#e74c3c" if p >= thr else "#2ecc40")
-            self.el_last.config(text=f"last: shown {lab.upper()}  →  P(error) {p:.2f}  "
+            score = f"{self.v_el_score.get()} P(error)" if facts else "P(error)"
+            self.el_last.config(text=f"last: {shown[lab]}  →  {score} {p:.2f}  "
                                      f"({'ok' if pred == lab else 'MISS'})",
                                 foreground="#1e8449" if pred == lab else "#c0392b")
         else:
             self.el_last.config(text="last trial: -", foreground="#333")
         x = int(W * thr)
         cv.create_line(x, 0, x, 18, fill="#333", width=2)
+        if facts:
+            self._el_trace_draw()                            # threshold line moved
+
+    # ----- facts test: easy true / false statements, each shown for a set time -----
+    def _facts_task_start(self, n, rate, secs, cv, on_start, on_end, on_done, on_progress,
+                          lead_ms=3000):
+        """Show n statements (``rate`` of them false) for ``secs`` each, with a fixation gap.
+        ``on_start(label, text, t)`` fires once a statement is painted, ``on_end(t)`` once it's
+        gone; the model scores the EEG in between. Shares the arrow task's abort token."""
+        self._errp_token = getattr(self, "_errp_token", 0) + 1
+        items = errp_facts.fact_order(n, rate)
+        self._facts_t = {"items": items, "k": 0, "secs": secs, "cv": cv, "on_start": on_start,
+                         "on_end": on_end, "on_done": on_done, "on_progress": on_progress}
+        on_progress(0, len(items))
+        self.after(lead_ms, self._facts_show, self._errp_token)
+
+    def _facts_show(self, token):
+        if token != self._errp_token:
+            return
+        t = self._facts_t
+        text, is_false = t["items"][t["k"]]
+        self._cue_statement(text, cv=t["cv"])
+        t["cv"].update_idletasks()               # paint the statement now, then timestamp it
+        t["on_start"]("error" if is_false else "correct", text, time.perf_counter())
+        t["k"] += 1
+        t["on_progress"](t["k"], len(t["items"]))
+        self.after(int(t["secs"] * 1000), self._facts_hide, token)
+
+    def _facts_hide(self, token):
+        if token != self._errp_token:
+            return
+        t = self._facts_t
+        self._cue_fixation(cv=t["cv"])
+        t["cv"].update_idletasks()
+        t["on_end"](time.perf_counter())
+        if t["k"] >= len(t["items"]):
+            self.after(1000, self._facts_done, token)
+        else:                                    # rest gap; long enough to finish scoring (0.8 s)
+            self.after(2000 + random.randint(0, 500), self._facts_show, token)
+
+    def _facts_done(self, token):
+        if token != self._errp_token:
+            return
+        self._cue_text("done", color="#888", cv=self._facts_t["cv"])
+        self._facts_t["on_done"]()
+
+    def _cue_statement(self, text, cv=None):
+        # same neutral colour for true and false statements: only the meaning differs
+        cv, w, h = self._cue_dims(cv); cv.delete("all")
+        cv.create_text(w / 2, h / 2, text=text, fill="#eee", width=int(w * 0.85),
+                       justify="center", font=("", max(18, int(h * 0.075)), "bold"))
 
     # ---------- shared ----------
     def _on_tab(self):
@@ -1216,6 +1466,10 @@ class EEGTab(ttk.Frame):
                     self._on_recorded(rest[0], rest[1])
                 elif kind == "errp_result":
                     self._el_on_result(rest[0], rest[1], rest[2])
+                elif kind == "errp_scan_p":
+                    self._el_trace_add(rest[0])
+                elif kind == "errp_scan":
+                    self._el_on_scan(*rest)
         except queue.Empty:
             pass
         if self.engine.mode == "errp_live":             # dead electrodes make the test meaningless

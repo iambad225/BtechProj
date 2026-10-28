@@ -97,9 +97,25 @@
   - README and methodology PDF updated; this log created (`_DOCS/PROJECT_LOG.md`)
   - All work since `ef96edf` (ErrP Live, timing/causal filtering, docs, this log, config/profile edits) committed to local branch **`errp-live-timing`**; `main` left at `ef96edf`; nothing pushed
 
+- **2026-10-28 — latency questions, stage 3 presentation, ErrP Live facts test**
+  - Window/step latency check (no code change)
+    - Step is a free latency cut: average wait = step / 2; Live reads it from Config, no retrain needed
+    - Window trades speed for accuracy; on the 15 Oct MI data a 2 s window keeps reporting the previous state for about 2 s after each cue; 500 ms never became reliable
+  - Advice recorded: neural networks not worthwhile yet (18 MI trials, 60 ErrP epochs); next upgrades are more clean data, a Riemannian classifier and filter-bank CSP; the CSP is currently unregularised
+  - Stage 3 mid-sem deck (`_DOCS/project stage 3 presentation/`) verified against the code, recordings and datasheets
+    - Flagged: "< 1 kΩ" impedance claim; "2-class MI" upcoming item vs the 3-class pipeline; terrestrial vs aerial vehicle; minor wording on Slides 6–7
+    - Speaker report written: `mid_sem_speaker_report.md` (slide-by-slide, line-by-line script, key terms, likely questions, demo run-sheet, numbers cheat sheet)
+  - ErrP Live: **Show results** toggle hides the verdict panel (last result, bar, trace, stats, log) so the subject doesn't see HIT/MISS mid-test; scoring continues
+  - ErrP Live: new **Test** selector — *Arrow feedback* or *True / false facts*
+    - `core/errp_facts.py`: 100 true + 100 false easy statements; most false ones turn false on their last word
+    - Each statement shown for **Fact time** (default 15 s, 2–60 s), same colour for true and false, 2–2.5 s fixation gap; *False share* sets the false fraction
+    - While a statement is up, the −0.2…+0.8 s epoch around every 0.1 s step is classified (live P(error) trace); the statement is scored on its **peak** or **mean** P(error) against the threshold
+  - README and methodology PDF updated (still 7 pages); tested headless with the synthetic source
+  - Committed to local branch `errp-live-timing` only — `main` has no ErrP Live tab; nothing pushed
+
 ## Current state
 
-- **EEG tab subtabs:** Config · Monitor · Record · Live · ErrP Live
+- **EEG tab subtabs:** Config · Monitor · Record · Live · ErrP Live (arrow feedback or true/false facts test)
 - **EEG models:** 3-class MI (CSP + pluggable classifier) and ErrP (ERP + shrinkage LDA)
 - **EMG:** multi-label classifier with Config · Monitor · Record · Live
 - **Evaluation:** trial-grouped stratified k-fold CV with a per-class report
@@ -117,3 +133,5 @@
 - Deferred: EMG-gated control loop; confidence threshold and smoothing for drone commands
 - Branches: `main` (local and GitHub) = `ef96edf`; newer work on local branch `errp-live-timing`, not pushed — merge/push when approved
 - Housekeeping: stale root `eeg_config.yaml` (old pipeline) left untracked
+- Before the stage 3 review: fix or defend the flagged slide claims; run the demo from `errp-live-timing` with a retrained ErrP model and a 1–45 Hz Monitor band-pass
+- Facts test: the arrow-trained ErrP model may not transfer (false statements classically evoke N400/P600 rather than a feedback ErrP, at an unlocked time); consider recording facts sessions to train on
