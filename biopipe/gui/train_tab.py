@@ -22,7 +22,7 @@ from storage.schema import ModelMeta, ChannelInfo, now_iso
 # Two models total: MI (rest/left/right, gate folded in) and ErrP.
 EEG_PARADIGMS = {
     "MI (rest/L/R)": ("mi", "mi", "csp"),
-    "ErrP": ("errp", "errp", "erp+lda"),
+    "ErrP": ("errp", "errp", "xdawn+riemann"),
 }
 MI_LABEL = "MI (rest/L/R)"
 
@@ -67,10 +67,12 @@ class TrainTab(ttk.Frame):
         self.model_combo = ttk.Combobox(top, textvariable=self.v_model, state="readonly", width=8,
                                         values=["lda", "svm", "logreg", "rf", "tree"])
         self.model_combo.grid(row=0, column=5, padx=2)
-        ttk.Label(top, text="Win/Step ms:").grid(row=0, column=6, padx=(8, 2))
         self.v_win = tk.StringVar(value="150"); self.v_step = tk.StringVar(value="40")
-        ttk.Entry(top, textvariable=self.v_win, width=6).grid(row=0, column=7)
-        ttk.Entry(top, textvariable=self.v_step, width=6).grid(row=0, column=8, padx=2)
+        self._win_widgets = [ttk.Label(top, text="Win/Step ms:"),
+                             ttk.Entry(top, textvariable=self.v_win, width=6),
+                             ttk.Entry(top, textvariable=self.v_step, width=6)]
+        for col, w in zip((6, 7, 8), self._win_widgets):
+            w.grid(row=0, column=col, padx=(8, 2) if col == 6 else 2)
         ttk.Button(top, text="↻ Refresh", command=self._refresh).grid(row=0, column=9, padx=(8, 0))
 
         lf = ttk.LabelFrame(self, text="Recordings (Ctrl/Shift-click to pool)", padding=6)
@@ -122,12 +124,11 @@ class TrainTab(ttk.Frame):
         self._refresh()
 
     def _update_model_vis(self):
-        """Show the classifier picker for EMG, and for EEG only on the MI paradigm."""
+        """Classifier picker and Win/Step for EMG and EEG MI; ErrP has a fixed pipeline and
+        cuts one fixed epoch per outcome, so neither applies to it."""
         show = (not self._is_eeg()) or (self.v_par.get() == MI_LABEL)
-        if show:
-            self.lbl_model.grid(); self.model_combo.grid()
-        else:
-            self.lbl_model.grid_remove(); self.model_combo.grid_remove()
+        for w in [self.lbl_model, self.model_combo] + self._win_widgets:
+            w.grid() if show else w.grid_remove()
 
     def _eeg_paradigm(self):
         return EEG_PARADIGMS[self.v_par.get()]           # (name, source_tag, features)

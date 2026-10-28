@@ -1,4 +1,4 @@
-"""Build ERD-ERS_MI_ErrP_Training_Methodology.pdf (revision 2: two-model paradigm).
+"""Build ERD-ERS_MI_ErrP_Training_Methodology.pdf (revision 3: cursor-task ErrP, xDAWN + Riemann).
 
 Usage (from the repo root; needs reportlab and the Windows Arial fonts):
     python _DOCS/source/build_training_methodology.py _DOCS/ERD-ERS_MI_ErrP_Training_Methodology.pdf
@@ -245,32 +245,23 @@ def fig_errp_timeline():
     x0, pps = 15, 128.0
     X = lambda t: x0 + t * pps
     yb, hb = 44, 28
-    d.add(Rect(X(0), yb, X(0.9) - X(0), hb, fillColor=FIX, strokeColor=colors.white))
-    d.add(String((X(0) + X(0.9)) / 2, yb + 15, "fixation  +", fontName="Arial-Bold", fontSize=8,
-                 fillColor=colors.white, textAnchor="middle"))
-    d.add(String((X(0) + X(0.9)) / 2, yb + 5, "0.7\u20131.1 s (jittered)", fontName="Arial",
-                 fontSize=6.8, fillColor=colors.white, textAnchor="middle"))
-    d.add(Rect(X(0.9), yb, X(1.8) - X(0.9), hb, fillColor=REST, strokeColor=colors.white))
-    d.add(String((X(0.9) + X(1.8)) / 2, yb + 15, "TARGET arrow", fontName="Arial-Bold",
-                 fontSize=8, fillColor=colors.white, textAnchor="middle"))
-    d.add(String((X(0.9) + X(1.8)) / 2, yb + 5, "0.9 s", fontName="Arial", fontSize=6.8,
-                 fillColor=colors.white, textAnchor="middle"))
-    d.add(Rect(X(1.8), yb + hb / 2, X(2.8) - X(1.8), hb / 2, fillColor=GO,
-               strokeColor=colors.white))
-    d.add(Rect(X(1.8), yb, X(2.8) - X(1.8), hb / 2, fillColor=WRONG, strokeColor=colors.white))
-    d.add(String((X(1.8) + X(2.8)) / 2, yb + hb / 2 + 4, "OK (matches target)",
-                 fontName="Arial-Bold", fontSize=7.4, fillColor=colors.white, textAnchor="middle"))
-    d.add(String((X(1.8) + X(2.8)) / 2, yb + 4, "WRONG (at error rate)", fontName="Arial-Bold",
-                 fontSize=7.4, fillColor=colors.white, textAnchor="middle"))
+    boxes = [(0.0, 0.9, FIX, "fixation  +", "0.7\u20131.1 s (jittered)"),
+             (0.9, 1.8, REST, "TARGET box", "you press \u2190/\u2192 (\u2264 Max wait)"),
+             (1.8, 2.8, colors.HexColor("#8a949b"), "cursor moves", "the wrong way at the error rate")]
+    for t0, t1, col, title, sub in boxes:
+        d.add(Rect(X(t0), yb, X(t1) - X(t0), hb, fillColor=col, strokeColor=colors.white))
+        d.add(String((X(t0) + X(t1)) / 2, yb + 15, title, fontName="Arial-Bold", fontSize=7.6,
+                     fillColor=colors.white, textAnchor="middle"))
+        d.add(String((X(t0) + X(t1)) / 2, yb + 5, sub, fontName="Arial", fontSize=6.6,
+                     fillColor=colors.white, textAnchor="middle"))
     d.add(Rect(X(2.8), yb, X(3.45) - X(2.8), hb, fillColor=FIX_LT, strokeColor=colors.white))
     d.add(String((X(2.8) + X(3.45)) / 2, yb + 10, "next trial", fontName="Arial", fontSize=7,
-                 fillColor=INK, textAnchor="middle"))
-    _label(d, (X(1.8) + X(2.8)) / 2, yb + hb + 4, "outcome · 1.0 s", anchor="middle")
-    # event marker (label to the left of the line, clear of the outcome label)
+                 fillColor=MUTED, textAnchor="middle"))
+    d.add(String((X(1.8) + X(2.8)) / 2, yb + hb + 4, "outcome \u00b7 Outcome s (1.0 s)",
+                 fontName="Arial-Italic", fontSize=6.8, fillColor=MUTED, textAnchor="middle"))
     d.add(Line(X(1.8), yb - 14, X(1.8), yb + hb + 16, strokeColor=INK, strokeWidth=1.1))
-    d.add(String(X(1.8) - 4, yb + hb + 9, "outcome onset = event, time-stamped correct / error",
+    d.add(String(X(1.8) - 4, yb + hb + 9, "move = event, time-stamped correct / error",
                  fontName="Arial-Bold", fontSize=7.2, fillColor=INK, textAnchor="end"))
-    # epoch
     ye, he = 20, 11
     d.add(Rect(X(1.6), ye, X(2.6) - X(1.6), he, fillColor=CALLOUT, strokeColor=TEAL,
                strokeWidth=0.8))
@@ -291,7 +282,7 @@ def on_page(c, doc):
     c.line(18 * mm, 14 * mm, A4[0] - 18 * mm, 14 * mm)
     c.setFont("Arial", 7.5); c.setFillColor(MUTED)
     c.drawString(18 * mm, 10 * mm, "biopipe \u2014 ERD/ERS, MI & ErrP training methodology "
-                                   "\u00b7 revision 2")
+                                   "\u00b7 revision 3")
     c.drawRightString(A4[0] - 18 * mm, 10 * mm, f"Page {doc.page}")
     c.restoreState()
 
@@ -503,58 +494,65 @@ S += [P("6. Model 1 \u2014 Motor imagery (rest / left / right)", h1),
 S += [P("7. Model 2 \u2014 Error-related potentials (correct / error)", h1),
       P("7.1 Subject technique", h2),
       *bullets([
-          "<b>Care about the outcome.</b> Watch the target, then the result, and let the natural "
-          "\u201cthat\u2019s wrong\u201d reaction happen.",
-          "Never move, sigh or clench on an error \u2014 a movement time-locked to errors is the fastest "
-          "way to ruin the data, because the model learns the artefact.",
+          "<b>Care about the outcome.</b> Press \u2190 or \u2192 toward the blue box, watch where the "
+          "cursor goes, and let the natural \u201cthat\u2019s wrong\u201d reaction happen.",
+          "One finger only; never move, sigh or clench on an error \u2014 a movement time-locked to "
+          "errors is the fastest way to ruin the data, because the model learns the artefact.",
           "Don\u2019t try to predict outcomes; react honestly. Blink during the fixation cross."]),
       P("7.2 Recording protocol", h2),
-      P("A cued feedback task on the Cue display: fixation, a blue target arrow, then an outcome "
-        "arrow. At the set error rate the system deliberately shows the other direction. The "
-        "outcome onset is time-stamped as <i>correct</i> or <i>error</i>, and each event yields one "
-        "epoch \u2014 one trial for cross-validation."),
+      P("<b>Cursor task</b> (recommended): fixation, then a target box on the left or right; you "
+        "press \u2190/\u2192 toward it and the cursor moves \u2014 the opposite way at the set error rate. "
+        "Your own command going wrong evokes an <i>interaction</i> ErrP, much stronger than watching "
+        "[11]; on our data only this task was decodable. A key away from the target, or none within "
+        "Max wait, leaves the trial unlabelled and it is repeated. <b>Arrow task</b> (observation): "
+        "a target arrow for 0.9 s, then the outcome arrow. In both, right and wrong outcomes look "
+        "identical except for the direction, the outcome is time-stamped as <i>correct</i> or "
+        "<i>error</i>, and each event yields one epoch \u2014 one trial for cross-validation."),
       KeepTogether([fig_errp_timeline(),
-                    P("Figure 3 \u2014 One ErrP trial and the epoch extracted around the outcome "
-                      "onset.", cap)]),
+                    P("Figure 3 \u2014 One cursor-task trial and the epoch extracted around the "
+                      "move.", cap)]),
       P("<b>How much:</b> about 3 s per trial, so 100 trials take roughly 5 minutes. Aim for at "
-        "least 200 trials (about 60 errors at 0.30) over 2 runs; 60 trials give only about 18 errors, "
-        "too few for a stable 5-fold estimate."),
+        "least 200 trials (about 60 errors at 0.30); record runs of one task only and train on them "
+        "together."),
       P("7.3 Features and model", h2),
-      P("Band-pass 1–10 Hz keeps the slow error components — the error-related negativity at "
-        "fronto-central sites, then the error positivity (Pe) [7, 8]. Each epoch is baseline-corrected "
-        "on −0.2 to 0 s, split into 12 time bins and averaged per bin and channel (12 × 8 = 96 "
-        "features), then classified by shrinkage LDA with balanced class priors — the standard "
-        "single-trial ERP classifier [9]."),
-      P("<b>What to expect:</b> about 65–80% balanced accuracy in good setups. Each outcome is "
-        "time-stamped after it is painted and mapped to the EEG through the stream clock, so "
-        "buffering delays don’t shift it; a frame or two of display lag remains. Be sceptical "
-        "of high scores from few trials."),
+      P("Band-pass 1\u201310 Hz keeps the slow error components \u2014 the error-related negativity at "
+        "fronto-central sites, then the error positivity (Pe) [7, 8]; each \u22120.2 to +0.8 s epoch is "
+        "baseline-corrected on \u22120.2 to 0 s. On this headset ~95% of the 1\u201310 Hz power is common "
+        "to all channels (the ear reference\u2019s own activity) and buries the error response, so the "
+        "model filters spatially first: xDAWN [12] learns two filters per class that maximise the "
+        "evoked response; each epoch is stacked under the two filtered class averages, its shrunk "
+        "covariance is mapped to the Riemannian tangent space [13], and a balanced logistic "
+        "regression gives P(error) \u2014 the BCI Challenge @ NER 2015 winning approach."),
+      P("<b>What to expect:</b> on the 28 Oct cursor sessions (180 trials) 0.78 balanced accuracy "
+        "(label-shuffle p = 0.01) and 0.73\u20130.81 on a held-out session, peaking at Cz; the arrow "
+        "task stays at chance, and the old time-bin + LDA model scored 0.55 on the cursor data."),
       P("7.4 Settings", h2),
       P("Table 5 \u2014 ErrP settings in the GUI", tcap),
       table(["Tab", "Setting", "Recommended", "Options / range", "Notes"],
             [["Record", "Subject", "Your ID", "Free text", "As for MI."],
-             ["Record", "Paradigm", "ErrP (feedback task)", "MI \u00b7 ErrP",
-              "Runs the target/outcome task on the Cue display."],
-             ["Record", "Trials", "100 per run", "20\u2013400", "About 3 s per trial."],
+             ["Record", "Paradigm", "ErrP (cursor task)", "MI \u00b7 cursor \u00b7 arrow",
+              "Cursor = press \u2190/\u2192 (interaction); arrow = watch."],
+             ["Record", "Trials \u00b7 Max wait \u00b7 Outcome s", "100 \u00b7 3 \u00b7 1.0",
+              "20\u2013400 \u00b7 1\u201310 \u00b7 0.8\u20135",
+              "About 3 s per trial; Max wait is the cursor task only."],
              ["Record", "Error rate", "0.30", "0.10\u20130.50 (step 0.05)",
               "Share of wrong outcomes; rarer errors evoke a stronger response, but fewer epochs."],
              ["Record", "Description", "Run notes", "Optional", "Saved in the recording\u2019s JSON."],
              ["Train", "Modality \u00b7 Paradigm", "EEG \u00b7 ErrP", "\u2014", "Lists only ErrP recordings."],
-             ["Train", "Model", "\u2014 (hidden)", "Fixed", "Always shrinkage LDA."],
-             ["Train", "Win / Step ms", "\u2014 (ignored)", "\u2014",
-              "ErrP uses fixed \u22120.2 to +0.8 s epochs."],
-             ["Train", "Recordings", "2 or more runs, pooled", "Ctrl/Shift-click; Refresh",
+             ["Train", "Model \u00b7 Win/Step", "\u2014 (hidden)", "Fixed",
+              "xDAWN + Riemann + LR on \u22120.2 to +0.8 s epochs."],
+             ["Train", "Recordings", "2+ runs of one task", "Ctrl/Shift-click; Refresh",
               "Same pooling rule as MI."],
              ["ErrP Live", "Test \u00b7 Trials \u00b7 Error rate \u00b7 Threshold",
-              "Arrow \u00b7 40 \u00b7 0.30 \u00b7 0.50", "Arrow / Facts; threshold 0.05\u20130.95",
-              "Each outcome scored; threshold re-scores all. Facts: section 9."]],
+              "Cursor \u00b7 40 \u00b7 0.30 \u00b7 0.50", "Cursor / Arrow / Facts; threshold 0.05\u20130.95",
+              "Each outcome scored; threshold re-scores all. Max wait / Outcome s as in Record."]],
             [40, 76, 94, 96, W_CONTENT - 306], group_col=0),
       P("7.5 In the app", h2),
       *steps([
           "Config preset and Monitor checks as for MI.",
-          "<b>Record</b> \u2192 Subject \u2192 Paradigm <i>ErrP (feedback task)</i> \u2192 Trials 100, "
-          "Error rate 0.30 \u2192 Record session, and watch the screen. Repeat for a second run.",
-          "<b>Train</b> \u2192 EEG \u2192 <i>ErrP</i> \u2192 Ctrl-click the runs \u2192 Train \u2192 Save model."]),
+          "<b>Record</b> \u2192 Subject \u2192 Paradigm <i>ErrP (cursor task)</i> \u2192 Trials 100, "
+          "Error rate 0.30 \u2192 Record session, and press \u2190/\u2192 toward the blue box. Repeat.",
+          "<b>Train</b> \u2192 EEG \u2192 <i>ErrP</i> \u2192 Ctrl-click the cursor runs \u2192 Train \u2192 Save model."]),
 ]
 
 # 8 Evaluation
@@ -600,7 +598,7 @@ S += [P("9. Live use", h1),
           "is and warns when data arrives in bursts; training and live use the same causal "
           "filters, so live results match training exactly.",
           "ErrP models are event-locked, so they are tested on the <b>ErrP Live</b> tab instead: it "
-          "runs the feedback task, classifies each outcome ~0.8 s after it is shown and scores it "
+          "runs the cursor or arrow task, classifies each outcome ~0.8 s after it and scores it "
           "against what was shown (accuracy, errors caught, false alarms, confusion matrix).",
           "ErrP Live's <b>True / false facts</b> test shows easy statements (100 true, 100 false) "
           "for <i>Fact time</i> (default 15 s, 2–60 s); every 0.1 s epoch is classified while one "
@@ -634,7 +632,7 @@ S += [KeepTogether([P("11. Pre-flight checklist", h1), chk])]
 
 # Changes from revision 1
 S += [KeepTogether([
-    P("Changes from revision 1", h1),
+    P("Changes since revision 1", h1),
     callout(bullets([
         "ERD/ERS is no longer a separate model — it is the MI model’s <i>rest</i> class.",
         "MI is 3-class with a selectable classifier (lda, svm, logreg, rf, tree).",
@@ -648,7 +646,9 @@ S += [KeepTogether([
         "Causal filtering in training and live: live results match training exactly, and the ErrP "
         "verdict arrives ~0.8 s after the outcome.",
         "Outcomes are mapped to the EEG through a stream clock, immune to USB buffering bursts.",
-        "Reference (SRB) and bias must be physically connected; the alpha check runs on P3/P4."]))])]
+        "Reference (SRB) and bias must be physically connected; the alpha check runs on P3/P4.",
+        "Rev. 3: ErrP uses the cursor (interaction) task; outcomes no longer differ in colour or text.",
+        "Rev. 3: the ErrP model is xDAWN + Riemannian tangent space + logistic regression."]))])]
 
 # Appendix
 S += [P("Appendix A \u2014 Settings fixed in code (not in the GUI)", h1),
@@ -665,10 +665,11 @@ S += [P("Appendix A \u2014 Settings fixed in code (not in the GUI)", h1),
              ["ErrP band-pass", "1\u201310 Hz, causal (same filter live and in training)",
               "eeg_training.ERRP_BAND"],
              ["ErrP epoch / baseline", "\u22120.2 to +0.8 s / \u22120.2 to 0 s", "ERRP_TMIN, ERRP_TMAX"],
-             ["ErrP features", "12 time bins \u00d7 8 channels = 96", "eeg_models.ErrPModel"],
-             ["ErrP classifier", "Shrinkage LDA, balanced priors", "eeg_models.ErrPModel"],
-             ["ErrP task timing", "Fixation 0.7\u20131.1 s \u00b7 target 0.9 s \u00b7 outcome 1.0 s",
-              "Record tab (ErrP)"],
+             ["ErrP features", "xDAWN 2 + 2 filters; 12 \u00d7 12 covariance \u2192 tangent space (78)",
+              "eeg_models.ErrPModel"],
+             ["ErrP classifier", "Logistic regression, balanced classes", "eeg_models.ErrPModel"],
+             ["ErrP task timing", "Fixation 0.7\u20131.1 s \u00b7 target until the key (arrow: 0.9 s) "
+              "\u00b7 outcome 1.0 s", "Record tab (ErrP), ErrP Live"],
              ["Cross-validation", "StratifiedGroupKFold, k = min(5, fewest trials in any class); "
               "final model refit on all data", "eeg_training._grouped_cv"],
              ["Live MI", "Continuous causal 8\u201330 Hz filter \u2192 newest window \u2192 model; "
@@ -702,6 +703,12 @@ refs = [
     "of ERP components \u2014 a tutorial. <i>NeuroImage</i>. 2011;56(2):814\u2013825.",
     "Varoquaux G, Raamana PR, Engemann DA, et al. Assessing and tuning brain decoders: "
     "cross-validation, caveats, and guidelines. <i>NeuroImage</i>. 2017;145:166\u2013179.",
+    "Ferrez PW, Mill\u00e1n JdR. Error-related EEG potentials generated during simulated "
+    "brain\u2013computer interaction. <i>IEEE Trans Biomed Eng</i>. 2008;55(3):923\u2013929.",
+    "Rivet B, Souloumiac A, Attina V, Gibert G. xDAWN algorithm to enhance evoked potentials: "
+    "application to brain\u2013computer interface. <i>IEEE Trans Biomed Eng</i>. 2009;56(8):2035\u20132043.",
+    "Congedo M, Barachant A, Bhatia R. Riemannian geometry for EEG-based brain\u2013computer "
+    "interfaces; a primer and a review. <i>Brain\u2013Computer Interfaces</i>. 2017;4(3):155\u2013174.",
 ]
 S += [P("References", h1)] + [P(f"[{i}]&nbsp;&nbsp;{r}", ref_st) for i, r in enumerate(refs, 1)]
 

@@ -185,7 +185,8 @@ def train_errp(sessions, cfg) -> Tuple[ErrPModel, dict]:
         raise ValueError(f"Not enough ErrP epochs ({len(epochs)}) with both error and correct.")
     classes = ["correct", "error"]
     cv = _grouped_cv(lambda: ErrPModel(), epochs, y, groups, 2)
-    metrics = {"paradigm": "errp", "classes": classes, "filter": "causal", "n_epochs": len(epochs),
+    metrics = {"paradigm": "errp", "classes": classes, "filter": "causal",
+               "method": ErrPModel.method, "n_epochs": len(epochs),
                "n_errors": int(np.sum(y == 1)), "n_trials": int(len(np.unique(groups)))}
     metrics.update(_cv_metrics(cv, classes))
     model = ErrPModel().fit(epochs, y)                    # final model on all data

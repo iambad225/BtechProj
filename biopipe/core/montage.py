@@ -49,11 +49,3 @@ OCCIPITAL = ["O1", "O2", "Oz"]
 
 DEFAULT_REF = "A1"
 DEFAULT_BIAS = "A2"
-
-
-def node_names() -> list[str]:
-    return list(NODES.keys())
-
-
-def is_ten_twenty(name: str) -> bool:
-    return name in TEN_TWENTY

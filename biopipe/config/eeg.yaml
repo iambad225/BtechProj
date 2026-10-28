@@ -1,5 +1,5 @@
 modality: eeg
-subject: subject
+subject: amogh_errp_trial_1
 board: cyton
 sample_rate: 250
 source:
@@ -10,8 +10,8 @@ source:
 filter:
   enabled: true
   notch_hz: 50.0
-  bandpass_low: 8.0
-  bandpass_high: 30.0
+  bandpass_low: 1.0
+  bandpass_high: 10.0
 electrodes:
 - channel: 0
   name: Fz
@@ -43,12 +43,10 @@ electrodes:
 - channel: 2
   name: FC6
   role: data
-window_ms: 2000
-step_ms: 500
+window_ms: 1000
+step_ms: 250
 transient_ms: 400
-labels:
-- mi_left
-- mi_right
+labels: []
 model_type: lda
 decision:
   on_threshold: 0.6
@@ -76,4 +74,4 @@ alpha_electrodes:
 - P3
 - P4
 alpha_threshold: 0.2
-paradigm: mi
+paradigm: errp

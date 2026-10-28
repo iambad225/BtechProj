@@ -112,6 +112,42 @@
     - While a statement is up, the −0.2…+0.8 s epoch around every 0.1 s step is classified (live P(error) trace); the statement is scored on its **peak** or **mean** P(error) against the threshold
   - README and methodology PDF updated (still 7 pages); tested headless with the synthetic source
   - Committed to local branch `errp-live-timing` only — `main` has no ErrP Live tab; nothing pushed
+  - ErrP arrow task: **Target s / Outcome s** now adjustable in Record and ErrP Live (defaults 0.9 / 1.0 s; outcome ≥ 0.8 s so it never disappears inside an epoch)
+    - Reported issue: verdicts seemed to belong to the previous step. They don't — each verdict carries its own trial label and epoch (verified); it only arrives ~0.8 s after the outcome, i.e. during the next fixation when Outcome is 1.0 s
+    - Measured with Outcome 2.0 s: verdicts 0.80–0.87 s after onset, while the outcome is still shown; the "last:" line now names the trial (#n)
+    - MI cue length was already adjustable (Record → Seconds/class)
+  - Monitor band composition + waterfall blank: Config Window ms had been set to **1** (in `eeg.yaml` and the ErrP profile), so the spectrum came from a 1-sample window
+    - Both files reset to 1000 ms; Config Apply / profile save and profile load now refuse Window < 250 ms or Step < 50 ms with a message
+    - Note: Window/Step and the band-pass in Config only drive the Monitor (and Record display); ErrP uses its fixed epoch, MI Live the model's own window
+  - New ErrP data: 4 sessions × 60 trials (240 epochs, 69 errors), all at chance (pooled 0.51)
+    - Markers verified: one marker per outcome onset, 2.6–3.1 s apart; the trainer cuts the full −0.2…+epoch window from it (single-cell label is intentional)
+    - Channels highly correlated (r 0.85–0.99 at 1–10 Hz); user's hardware checks (blink, press, jaw, alpha) all pass, so signals accepted as real
+    - No error-vs-correct difference at any channel or time point out to 2 s (0 of 500 samples p<0.01 per channel)
+  - ErrP epoch length now adjustable: Train tab shows **Epoch ms** for ErrP (default 2000, 500–3000; 800 = classic); bins stay ~83 ms (26 × 8 = 208 features at 2 s); stored on the model (`ErrPModel.tmax`), ErrP Live cuts the same window (old models: 0.8 s); Record keeps recording 3.2 s after the last outcome; facts gap ≥ epoch + 0.3 s
+    - Same 240 epochs: 0.8 s 0.51 · 1.0 s 0.53 · 1.5 s 0.54 · 2.0 s 0.545 ± 0.04 — permutation test p = 0.13 (not above chance)
+    - ErrP Live with a real 2 s model: verdicts 2.01–2.07 s after each outcome
+  - 2 s ErrP epoch **reverted** at user request (fixed −0.2…+0.8 s again; Train tab back to Win/Step, ignored for ErrP)
+  - ErrP task **replaced by the interaction (cursor) task** in Record and ErrP Live: target box left/right → subject presses ←/→ → cursor moves (opposite way at the error rate); both outcomes drawn identically (no red/green, no OK/WRONG); slips and no-press trials unlabelled and repeated; Max wait s (default 3) replaces Target s
+    - Tested (simulated key presses): labels match the drawn movement in ErrP Live and Record; verdicts 0.81–0.86 s after the move
+    - Keyboard focus moves to the task display each trial (focus_set, never focus_force)
+  - **ErrP signal extraction — real-data comparison of published pipelines** (4 arrow + 3 cursor sessions, trial-grouped 5-fold CV)
+    - Marker-free checks: residual after removing the shared signal has a 1/f EEG spectrum (signals are real); ~95% of 1–10 Hz power is common to all channels (ear-reference activity)
+    - Arrow (watch) task: every method at chance (best xDAWN + LDA 0.58, p = 0.08) — no ErrP in observation data
+    - Cursor (press) task: old bins + sLDA 0.55 → CAR 0.73 · spatial whitening (Farquhar & Hill 2013) 0.74 · xDAWN + bins (Rivet 2009) 0.74 · **xDAWN covariances + Riemannian tangent space + LR (BCI Challenge @ NER 2015 winner) 0.78, label-shuffle p = 0.01**; fronto-central subset and theta features did not help
+    - Validity: error − correct difference peaks at Cz (− ~350 ms, + ~420 ms); unchanged without blink-sized epochs (0.77) and without FC5/FC6 (0.78 held-out); held-out sessions 0.73 / 0.79 / 0.81
+  - **ErrP model replaced** by xDAWN (2 + 2 filters) + Ledoit–Wolf super-trial covariances + tangent space + balanced logistic regression (`core/eeg_models.ErrPModel`, `metrics.method = "xdawn+riemann"`); ErrP Live refuses old-pipeline models with a retrain message
+  - **Arrow task restored** as an option next to the cursor task (Record: ErrP (cursor task) / ErrP (arrow task); ErrP Live: Cursor / Arrow / Facts), sharing one code path; outcome arrow now neutral colour, no OK/WRONG text
+  - Clean-up: removed unused `ERDGate`, zero-phase `bandpass` (filtfilt — wrong for live use), `feature_names`, `node_names`, `is_ten_twenty`; Train tab hides Win/Step and the classifier for ErrP (fixed pipeline)
+  - Tests on replayed real EEG (no simulated data): ErrP Live cursor + arrow — labels match drawn outcomes, live P(error) = offline to 1e-15
+  - README, methodology PDF (revision 3) and speaker report updated
+  - Stage 3 deck updated (now 15 slides; compiled locally with MiKTeX, installer disabled)
+    - New Slide 9 after the demo: related work, Heim et al., *IEEE Access* 13:91232–91247 (2025) — title, hardware figure, results table, full citation (details checked on IEEE Xplore)
+    - Slide 10 rewritten for the cursor task and xDAWN covariances + Riemannian tangent space + logistic regression (with equations); new Slide 11: method comparison on our data + validity checks
+    - Slides 2, 6 and 7 updated to match; speaker report rewritten for Slides 9–11 and renumbered to 15 slides
+    - Speaker report: new "Concepts explained simply" section (xDAWN, prototypes, covariance, Riemannian / tangent space, logistic regression, p-value) with analogies, linked from Slides 10–11
+  - Branch check: cursor recordings (28 Oct 18:57–19:03) were made with the uncommitted working tree on `errp-live-timing`; `main` (`ef96edf`) has no cursor task, ErrP Live or stream clock — branch kept, not deleted
+  - All work committed on `errp-live-timing`, `main` fast-forwarded to it and pushed to GitHub; the merged `errp-live-timing` branch deleted (local only, never pushed)
+  - Speaker report also produced as PDF (`mid_sem_speaker_report.pdf`, 12 pages, same styling as the methodology PDF); regenerate after editing the `.md` with `python _DOCS/source/build_speaker_report.py`
 
 ## Current state
 
@@ -131,7 +167,8 @@
 - Fix the recurring railed channels (Fz, FC5, FC6, C3, P3, P4) — contact / wiring
 - Collect more data: ≥ 25–30 MI trials per class, ≥ 200 ErrP trials
 - Deferred: EMG-gated control loop; confidence threshold and smoothing for drone commands
-- Branches: `main` (local and GitHub) = `ef96edf`; newer work on local branch `errp-live-timing`, not pushed — merge/push when approved
 - Housekeeping: stale root `eeg_config.yaml` (old pipeline) left untracked
 - Before the stage 3 review: fix or defend the flagged slide claims; run the demo from `errp-live-timing` with a retrained ErrP model and a 1–45 Hz Monitor band-pass
+- Retrain the ErrP model on the cursor sessions (old-pipeline models are refused); record more cursor runs (≥ 200 trials)
+- Store per-event target / pressed / moved direction in recordings, to test the eye-movement confound directly
 - Facts test: the arrow-trained ErrP model may not transfer (false statements classically evoke N400/P600 rather than a feedback ErrP, at an unlocked time); consider recording facts sessions to train on

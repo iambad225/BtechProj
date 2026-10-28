@@ -81,24 +81,40 @@ Each Config tab has a **Profile** bar (save/load named configurations under
   warns if a run captured dead channels, and training refuses them with a clear message.
 - **Record** — **subject** + a large subject-facing **cue** display with a corner countdown.
   Two paradigms: **MI** (rest / left / right cues, block-randomised: each class once per rep,
-  equal counts, never the same cue twice in a row) and **ErrP** (a cued feedback task that marks
-  error vs correct events). Saved under `data/training/`.
+  equal counts, never the same cue twice in a row; cue length = **Seconds/class**) and two **ErrP**
+  tasks that mark each outcome as error or correct:
+  - **ErrP (cursor task)** — recommended. A target box lights up left or right; the subject
+    presses **←/→** toward it and the cursor moves — the opposite way at **Error rate**. Their own
+    command going wrong (an *interaction* ErrP) gives a far stronger response than watching: on our
+    data the cursor task is decodable (0.78 balanced accuracy) and the arrow task is not. A key away
+    from the target (a slip) or no key within **Max wait s** leaves the trial unlabelled and it is
+    repeated.
+  - **ErrP (arrow task)** — observation: a target arrow for 0.9 s, then the outcome arrow.
+  - Right and wrong outcomes are drawn identically (same colour, no OK/WRONG text), so only the
+    error itself can drive the response. **Outcome s** (default 1.0, ≥ 0.8 so the outcome never
+    disappears inside an epoch) sets how long it stays up.
+
+  Saved under `data/training/`.
 - **Live** — run a trained MI model on the stream; a probability bar per class
   (rest / left / right) with the top class highlighted (a `rest` prediction = gate closed).
 - **ErrP Live** — test a trained ErrP model on live EEG. ErrP is event-locked, so this runs the
-  same target/outcome feedback task as Record; at each outcome the −0.2…+0.8 s epoch is cut from
-  the continuously filtered stream (same causal 1–10 Hz filter and baseline as training) and
-  classified as soon as it ends (~0.8 s after the outcome), then scored against what was actually
-  shown: per-trial log, P(error) bar, running accuracy, errors caught, false alarms and a
+  same cursor or arrow task as Record; at each outcome the −0.2…+0.8 s epoch is cut from the
+  continuously filtered stream (same causal 1–10 Hz filter and baseline as training) and
+  classified as soon as it ends (~0.8 s after the outcome), then scored against what actually
+  happened: per-trial log, P(error) bar, running accuracy, errors caught, false alarms and a
   confusion matrix. The threshold is adjustable and re-scores every trial.
-  - **Test** selector: *Arrow feedback* (above) or *True / false facts*: easy statements
+  - **Test** selector: *Cursor (press ←/→)*, *Arrow (watch)*, or *True / false facts*: easy statements
     (`core/errp_facts.py`, 100 true + 100 false, most false ones turning false on their last word)
     shown one at a time for **Fact time** seconds (default 15), with a 2–2.5 s fixation gap.
     *False share* sets the fraction of false statements. While a statement is up, the moment the
-    error is noticed isn't known, so every point is treated as a possible event: the −0.2…+0.8 s
+    error is noticed isn't known, so every point is treated as a possible event: the model's
     epoch around it is classified every 0.1 s (live P(error) trace). The statement's **Score** is
-    the *peak* or *mean* of those values, thresholded like the arrow test (TRUE / FALSE rows in
+    the *peak* or *mean* of those values, thresholded like the other tests (TRUE / FALSE rows in
     the confusion matrix). True and false statements are drawn in the same colour.
+  - **Max wait (s)** (cursor) / **Outcome (s)**: as in Record. A verdict needs the 0.8 s epoch
+    after its outcome; with Outcome ≥ ~1.5 s it arrives while that outcome is still on screen
+    (otherwise it lands in the next trial, but is still that trial's verdict — the log and the
+    "last: #n" line name the trial). Models from the old ErrP pipeline ask to be retrained.
   - **Show results** toggle hides the verdict panel (last result, bar, trace, stats, log) so the
     subject doesn't see HIT/MISS feedback mid-test; scoring carries on and reappears when ticked.
 
@@ -107,11 +123,13 @@ a *stream clock* (the lower envelope of chunk arrival times against the 250 Hz s
 USB/serial buffering bursts don't shift the marker — in Record and ErrP Live alike. Monitor, Live
 and ErrP Live show a **data delay** readout (how stale the newest sample is) and warn when data
 arrives in bursts. Training and the live tabs use the **same causal filters**, so live results
-match training exactly; models trained before this change ask to be retrained.
+match training exactly.
 
 ### Train tab
 Pick the **modality**; for EEG choose the **paradigm** (`MI (rest/L/R)` or `ErrP`) and, for MI,
-the **classifier** (`lda` / `svm` / `logreg` / `rf` / `tree`). Select one or more recordings
+the **classifier** (`lda` / `svm` / `logreg` / `rf` / `tree`) and Win/Step (ErrP has a fixed
+pipeline and epoch, so neither is shown for it). Train ErrP on one task's recordings — cursor and
+arrow responses differ. Select one or more recordings
 (Ctrl/Shift-click to pool; **↻ Refresh** to pick up new ones), review each one's metadata +
 description, then **Train** and **Save** with a description.
 
@@ -131,6 +149,19 @@ sample rate, and label set**; incompatible picks are blocked.
 
 Two EEG models total: the 3-class **MI** decoder (its `rest` class is the ERD/ERS gate, so
 there's no separate gate model) and **ErrP**.
+
+**Why the ErrP model uses spatial filtering.** On this headset ~95% of the 1–10 Hz power is common
+to all eight channels (the ear reference's own activity), and the error response is a small
+per-channel difference under it. Time-binned amplitudes + shrinkage LDA on the raw channels stayed
+at chance (0.55 on the cursor task). The ErrP model is now **xDAWN spatial filters (Rivet et al.
+2009) + Riemannian tangent space + logistic regression** — the BCI Challenge @ NER 2015 winning
+approach for feedback errors: per class, xDAWN finds the channel combinations that maximise the
+evoked response; each epoch is stacked under the two filtered class averages, its shrunk
+(Ledoit–Wolf) covariance is mapped to the tangent space at the training mean, and a balanced
+logistic regression outputs P(error). On the 28 Oct cursor sessions (180 trials): 0.78 balanced
+accuracy (5-fold grouped CV; label-shuffle p = 0.01), 0.73–0.81 on a held-out session, unchanged
+without the eye-movement-sensitive FC5/FC6 and without blink-sized epochs; the error − correct
+difference peaks at Cz (negative ~350 ms, positive ~420 ms).
 
 ---
 
@@ -233,7 +264,8 @@ biopipe/
 - **New EMG feature/model**: `core/features_emg.py`, `core/model.py` (models are pluggable:
   `lda` / `logreg` / `rf` / `svm` / `tree`).
 - **EEG paradigms**: MI (CSP + pluggable classifier, one-vs-rest CSP for the 3-class case) and
-  ErrP (event-locked ERP + shrinkage LDA) live in `core/eeg_models.py` + `core/eeg_training.py`
+  ErrP (xDAWN + Riemannian tangent space + logistic regression) live in `core/eeg_models.py` +
+  `core/eeg_training.py`
   (`core/csp.py` for CSP); add a paradigm by extending `train_paradigm` and the Train tab's list.
 
 ## Notes

@@ -18,7 +18,7 @@ from core.config import Config, default_config, Electrode, mi_errp_montage
 from core.dsp import RealTimeFilter
 from core import features_eeg as EF
 from core.montage import OCCIPITAL
-from core.eeg_models import StreamBandpass, epoch_signal
+from core.eeg_models import StreamBandpass, epoch_signal, ErrPModel
 from core.eeg_training import ERRP_BAND, ERRP_TMIN, ERRP_TMAX
 from core.quality import channel_status, dead_channels
 from core import errp_facts
@@ -40,7 +40,10 @@ BAND_COLORS = {"delta": "#6c5ce7", "theta": "#0984e3", "alpha": "#e17055",
 # MI is now rest/left/right, so its own 'rest' class is the gate (no separate ERD model).
 LIVE_PARADIGMS = {"mi": ((8.0, 30.0), "MI")}
 # ErrP Live tests: the event-locked arrow task, or statements read for as long as they're shown
-EL_TESTS = ("Arrow feedback", "True / false facts")
+EL_TESTS = ("Cursor (press ←/→)", "Arrow (watch)", "True / false facts")
+ERRP_TASKS = {EL_TESTS[0]: "cursor", EL_TESTS[1]: "arrow"}
+REC_ERRP = {"ErrP (cursor task)": "cursor", "ErrP (arrow task)": "arrow"}
+OUTCOME_COLOUR = "#e8e8e8"      # one colour for right and wrong outcomes: only the direction differs
 
 
 def mi_cue_order(classes, reps, rng=random):
@@ -586,8 +589,9 @@ class EEGTab(ttk.Frame):
         self.cfg.filter.bandpass_low = float(self.v_lo.get())
         self.cfg.filter.bandpass_high = float(self.v_hi.get())
         self.cfg.car = bool(self.v_car.get())
-        self.cfg.window_ms = int(float(self.v_win.get()))
-        self.cfg.step_ms = int(float(self.v_step.get()))
+        win, step = int(float(self.v_win.get())), int(float(self.v_step.get()))
+        self._check_timing(win, step)
+        self.cfg.window_ms, self.cfg.step_ms = win, step
         self.cfg.alpha_threshold = float(self.v_alpha_thr.get())
         self.cfg.labels = list(self.actions_list.get(0, tk.END))
         occ = [e.name for e in data if e.name in OCCIPITAL]
@@ -628,7 +632,22 @@ class EEGTab(ttk.Frame):
         for a in cfg.labels:
             self.actions_list.insert(tk.END, a)
 
+    @staticmethod
+    def _check_timing(win_ms, step_ms):
+        """The Monitor's band composition, waterfall and alpha test take a spectrum of the last
+        Window ms; a few ms gives a one-sample 'spectrum' and they silently show nothing."""
+        if win_ms < 250:
+            raise ValueError(f"Window {win_ms} ms is too short: band composition, the waterfall "
+                             "and the alpha test need at least 250 ms (1000-2000 ms recommended).")
+        if step_ms < 50:
+            raise ValueError(f"Step {step_ms} ms is too short: use 50 ms or more (250 ms is typical).")
+
     def _on_profile_load(self, cfg):
+        try:
+            self._check_timing(cfg.window_ms, cfg.step_ms)
+        except ValueError as e:
+            messagebox.showerror("Invalid profile", f"{e}\nFix it in the profile, or set it here "
+                                                    "and Apply & Save."); return
         cfg.modality = "eeg"
         self.cfg = cfg
         self._populate_config(cfg)
@@ -737,7 +756,7 @@ class EEGTab(ttk.Frame):
         ttk.Label(left, text="Paradigm").grid(row=2, column=0, sticky="e", padx=4, pady=2)
         self.v_paradigm = tk.StringVar(value="MI (left/right)")
         pc = ttk.Combobox(left, textvariable=self.v_paradigm, state="readonly", width=18,
-                          values=["MI (left/right)", "ErrP (feedback task)"])
+                          values=["MI (left/right)", *REC_ERRP])
         pc.grid(row=2, column=1, sticky="w")
         pc.bind("<<ComboboxSelected>>", lambda e: self._rec_mode())
 
@@ -758,6 +777,14 @@ class EEGTab(ttk.Frame):
         ttk.Label(self.errp_frame, text="Error rate").grid(row=1, column=0, sticky="e", padx=4)
         self.v_errrate = ttk.Spinbox(self.errp_frame, from_=0.1, to=0.5, increment=0.05, width=5)
         self.v_errrate.set(0.30); self.v_errrate.grid(row=1, column=1, sticky="w")
+        wait_lbl = ttk.Label(self.errp_frame, text="Max wait s")
+        wait_lbl.grid(row=2, column=0, sticky="e", padx=4)
+        self.v_wait_s = ttk.Spinbox(self.errp_frame, from_=1.0, to=10.0, increment=0.5, width=5)
+        self.v_wait_s.set(3.0); self.v_wait_s.grid(row=2, column=1, sticky="w")
+        self._rec_wait_widgets = [wait_lbl, self.v_wait_s]           # cursor task only
+        ttk.Label(self.errp_frame, text="Outcome s").grid(row=3, column=0, sticky="e", padx=4)
+        self.v_outcome_s = ttk.Spinbox(self.errp_frame, from_=0.8, to=5.0, increment=0.1, width=5)
+        self.v_outcome_s.set(1.0); self.v_outcome_s.grid(row=3, column=1, sticky="w")
 
         ttk.Label(left, text="Description").grid(row=5, column=0, sticky="e", padx=4, pady=2)
         self.v_desc = tk.StringVar()
@@ -781,8 +808,11 @@ class EEGTab(ttk.Frame):
         self._rec_mode()
 
     def _rec_mode(self):
-        if self.v_paradigm.get().startswith("ErrP"):
+        task = REC_ERRP.get(self.v_paradigm.get())
+        if task:
             self.mi_frame.grid_remove(); self.errp_frame.grid()
+            for w in self._rec_wait_widgets:
+                w.grid() if task == "cursor" else w.grid_remove()
         else:
             self.errp_frame.grid_remove(); self.mi_frame.grid()
 
@@ -842,8 +872,9 @@ class EEGTab(ttk.Frame):
             self.engine.start()
         except Exception as e:
             self.rec_btn.config(state="normal"); messagebox.showerror("Source error", str(e)); return
-        if self.v_paradigm.get().startswith("ErrP"):
-            self._record_errp()
+        task = REC_ERRP.get(self.v_paradigm.get())
+        if task:
+            self._record_errp(task)
         else:
             self._record_mi()
 
@@ -859,8 +890,8 @@ class EEGTab(ttk.Frame):
         self.rec_status.config(text=f"Recording MI — {reps} each of rest, {', '.join(classes)} "
                                     "in random order. Follow the cue.")
 
-    # ----- ErrP cued feedback task (shared by Record and the ErrP Live test) -----
-    def _record_errp(self):
+    # ----- ErrP tasks (shared by Record and the ErrP Live test) -----
+    def _record_errp(self, task):
         self.cfg.paradigm = "errp"; self.cfg.labels = ["correct", "error"]
         self._cue_deadline = None            # ErrP is fast/event-locked: no countdown
         self.engine.start_errp()
@@ -868,20 +899,60 @@ class EEGTab(ttk.Frame):
             int(self.v_trials.get()), float(self.v_errrate.get()), self.cue_canvas,
             on_event=lambda lab, ts: self.engine.mark_event(lab, ts),
             on_done=lambda: self.engine.finish_errp(),
-            on_progress=lambda k, n: self.rec_status.config(text=f"ErrP task: {k}/{n}"),
-            lead_ms=3000)       # same lead-in as ErrP Live: the causal filter settles first
+            on_progress=lambda k, n, note="": self.rec_status.config(
+                text=f"ErrP task: {k}/{n}" + (f"  ({note})" if note else "")),
+            lead_ms=3000,       # same lead-in as ErrP Live: the causal filter settles first
+            task=task, **self._errp_times(self.v_wait_s, self.v_outcome_s))
 
-    def _errp_task_start(self, n, rate, cv, on_event, on_done, on_progress, lead_ms=500):
-        """Run n trials: fixation -> target arrow -> outcome arrow (wrong at ``rate``).
-        ``on_event(label)`` fires at each outcome onset - the instant the ErrP is time-locked to."""
+    @staticmethod
+    def _errp_times(wait_w, outcome_w):
+        """Response window / outcome display time from two spinboxes. The outcome stays up at least
+        until the classic epoch end (ERRP_TMAX), so its disappearance never falls inside it."""
+        def val(w, default, lo, hi):
+            try:
+                return min(hi, max(lo, float(w.get())))
+            except ValueError:
+                return default
+        return {"wait_s": val(wait_w, 3.0, 1.0, 10.0),
+                "outcome_s": val(outcome_w, 1.0, ERRP_TMAX, 5.0)}
+
+    def _errp_task_start(self, n, rate, cv, on_event, on_done, on_progress, lead_ms=500,
+                         task="cursor", wait_s=3.0, outcome_s=1.0):
+        """n labelled trials: fixation -> target (left or right) -> a command toward it is
+        executed, the opposite way at ``rate``. Right and wrong outcomes look identical except
+        for the direction, so only the error itself can drive the response.
+          task="cursor": the subject presses Left/Right (interaction ErrP: their own command goes
+            wrong, the stronger response). A key away from the target (a slip) or no key within
+            ``wait_s`` leaves the trial unlabelled and it is repeated.
+          task="arrow": the target arrow shows for 0.9 s, then the outcome arrow (observation).
+        ``on_event(label, t)`` fires at the outcome: 'error' if it went against the command."""
         self._errp_token = getattr(self, "_errp_token", 0) + 1
-        self._errp_t = {"n": n, "left": n, "rate": rate, "cv": cv, "target": None,
-                        "on_event": on_event, "on_done": on_done, "on_progress": on_progress}
+        self._errp_t = {"n": n, "left": n, "rate": rate, "cv": cv, "target": None, "task": task,
+                        "wait_s": wait_s, "outcome_s": outcome_s, "armed": False, "timer": None,
+                        "slips": 0, "misses": 0, "on_event": on_event, "on_done": on_done,
+                        "on_progress": on_progress}
+        self._errp_bind_keys()
         on_progress(0, n)
         self.after(lead_ms, self._errp_next, self._errp_token)
 
+    def _errp_bind_keys(self):
+        if not getattr(self, "_errp_keys_bound", False):
+            top = self.winfo_toplevel()
+            top.bind_all("<KeyPress-Left>", lambda e: self._errp_key("left"), add="+")
+            top.bind_all("<KeyPress-Right>", lambda e: self._errp_key("right"), add="+")
+            self._errp_keys_bound = True
+
     def _errp_abort(self):
         self._errp_token = getattr(self, "_errp_token", 0) + 1     # orphans pending callbacks
+        t = getattr(self, "_errp_t", None)
+        if t:
+            t["armed"] = False
+
+    def _errp_progress(self, note=""):
+        t = self._errp_t
+        extra = [s for s in (f"{t['slips']} slips" if t["slips"] else "",
+                             f"{t['misses']} too slow" if t["misses"] else "", note) if s]
+        t["on_progress"](t["n"] - t["left"], t["n"], ", ".join(extra))
 
     def _errp_next(self, token):
         if token != self._errp_token:
@@ -898,22 +969,73 @@ class EEGTab(ttk.Frame):
             return
         t = self._errp_t
         t["target"] = random.choice(["left", "right"])
-        self._cue_arrow(t["target"], "#4a90d9", "TARGET", cv=t["cv"])
-        self.after(900, self._errp_outcome, token)
+        if t["task"] == "arrow":                 # observation: the 'command' is the target itself
+            self._cue_arrow(t["target"], "#4a90d9", "TARGET", cv=t["cv"])
+            self.after(900, self._errp_move, token, t["target"])
+            return
+        self._cue_cursor(t["target"], "center", hint=True, cv=t["cv"])
+        # keyboard focus on the task display every trial: otherwise the arrows go to whatever was
+        # clicked last (the tab bar even switches tabs on Left/Right, which stops the test).
+        # focus_set, not focus_force: never steal the keyboard from another program
+        t["cv"].focus_set()
+        t["armed"] = True
+        t["timer"] = self.after(int(t["wait_s"] * 1000), self._errp_timeout, token)
 
-    def _errp_outcome(self, token):
+    def _errp_timeout(self, token):
+        t = self._errp_t
+        if token != self._errp_token or not t["armed"]:
+            return
+        t["armed"] = False; t["misses"] += 1
+        self._cue_text("too slow", color="#888", cv=t["cv"])
+        self._errp_progress()
+        self.after(800, self._errp_next, token)
+
+    def _errp_key(self, pressed):
+        t = getattr(self, "_errp_t", None)
+        if not t or not t["armed"]:
+            return
+        t["armed"] = False
+        if t["timer"] is not None:
+            self.after_cancel(t["timer"]); t["timer"] = None
+        self._errp_move(self._errp_token, pressed)
+
+    def _errp_move(self, token, pressed):
+        """Execute the command ``pressed`` (wrong at the error rate) and mark the outcome."""
         if token != self._errp_token:
             return
         t = self._errp_t
         is_err = random.random() < t["rate"]
-        outcome = ("right" if t["target"] == "left" else "left") if is_err else t["target"]
-        self._cue_arrow(outcome, "#e74c3c" if is_err else "#2ecc40",
-                        "WRONG" if is_err else "OK", cv=t["cv"])
+        moved = ("right" if pressed == "left" else "left") if is_err else pressed
+        if t["task"] == "arrow":
+            self._cue_arrow(moved, OUTCOME_COLOUR, cv=t["cv"])
+        else:
+            self._cue_cursor(t["target"], moved, cv=t["cv"])
         t["cv"].update_idletasks()               # paint the outcome now, then timestamp its onset
-        t["on_event"]("error" if is_err else "correct", time.perf_counter())
-        t["left"] -= 1
-        t["on_progress"](t["n"] - t["left"], t["n"])
-        self.after(1000, self._errp_next, token)
+        if pressed == t["target"]:
+            t["on_event"]("error" if is_err else "correct", time.perf_counter())
+            t["left"] -= 1
+        else:                                    # own slip: the subject's error, not the machine's
+            t["slips"] += 1
+        self._errp_progress()
+        self.after(int(t["outcome_s"] * 1000), self._errp_next, token)
+
+    def _cue_cursor(self, target, cursor, hint=False, cv=None):
+        """Left/right boxes with the target one highlighted, and the cursor at 'center', 'left' or
+        'right'. Drawn the same way after a right or a wrong move, so only the direction differs."""
+        cv, w, h = self._cue_dims(cv); cv.delete("all")
+        cy, s = h * 0.45, h * 0.11
+        xs = {"left": w * 0.22, "center": w * 0.5, "right": w * 0.78}
+        for side in ("left", "right"):
+            on = side == target
+            cv.create_rectangle(xs[side] - s, cy - s, xs[side] + s, cy + s, width=4,
+                                outline="#4a90d9" if on else "#555",
+                                fill="#1d3550" if on else "")
+        cv.create_line(xs["left"] + s, cy, xs["right"] - s, cy, fill="#333", width=2)
+        r = h * 0.045
+        cv.create_oval(xs[cursor] - r, cy - r, xs[cursor] + r, cy + r, fill="#f1c40f", width=0)
+        if hint:
+            cv.create_text(w / 2, h * 0.82, text="press  ←  or  →  toward the blue box",
+                           fill="#777", font=("", max(10, int(h * 0.04))))
 
     # ---------- live (run trained models on the stream) ----------
     def _build_live(self):
@@ -967,13 +1089,6 @@ class EEGTab(ttk.Frame):
                     "dongle's FTDI latency timer to 1 ms (see README).")
         return txt, warn
 
-    def _warn_old_filter(self, meta, name):
-        if (meta.metrics or {}).get("filter") != "causal":
-            messagebox.showwarning(
-                "Retrain recommended",
-                f"{name} was trained before the switch to causal filtering, so live results won't "
-                "match its training scores. Retrain it on the Train tab (same recordings).")
-
     def _model_cols(self, meta, name):
         """Columns of the model's electrodes in the current stream (model order), or None after
         telling the user which electrodes the current montage is missing."""
@@ -1001,7 +1116,6 @@ class EEGTab(ttk.Frame):
         for i in sel:
             e = self._eeg_models[i]
             model, meta = models.load_model(e["folder"])
-            self._warn_old_filter(meta, e["folder"].name)
             paradigm = (meta.paradigm or getattr(model, "kind", "")).lower()
             if paradigm not in LIVE_PARADIGMS:
                 skipped.append(f"{e['folder'].name} ({paradigm or '?'})"); continue
@@ -1099,6 +1213,18 @@ class EEGTab(ttk.Frame):
         score.grid(row=7, column=1, sticky="w")
         score.bind("<<ComboboxSelected>>", lambda e: self._el_render())      # re-scores every fact
         self._el_fact_widgets = [secs_lbl, self.el_secs, score_lbl, score]
+        # cursor test only: how long to wait for the key, and how long the moved cursor stays up.
+        # An outcome at least as long as the model's epoch keeps it on screen until its verdict
+        tgt_lbl = ttk.Label(left, text="Max wait (s)")
+        tgt_lbl.grid(row=6, column=0, sticky="e", padx=4)
+        self.el_wait_s = ttk.Spinbox(left, from_=1.0, to=10.0, increment=0.5, width=6)
+        self.el_wait_s.set(3.0); self.el_wait_s.grid(row=6, column=1, sticky="w")
+        out_lbl = ttk.Label(left, text="Outcome (s)")
+        out_lbl.grid(row=7, column=0, sticky="e", padx=4)
+        self.el_outcome_s = ttk.Spinbox(left, from_=0.8, to=5.0, increment=0.1, width=6)
+        self.el_outcome_s.set(1.0); self.el_outcome_s.grid(row=7, column=1, sticky="w")
+        self._el_arrow_widgets = [tgt_lbl, self.el_wait_s, out_lbl, self.el_outcome_s]
+        self._el_wait_widgets = [tgt_lbl, self.el_wait_s]                # cursor test only
         ttk.Label(left, text="Threshold").grid(row=8, column=0, sticky="e", padx=4)
         self.el_thr = ttk.Spinbox(left, from_=0.05, to=0.95, increment=0.05, width=6,
                                   command=self._el_render)
@@ -1154,12 +1280,17 @@ class EEGTab(ttk.Frame):
         self._el_mode()
 
     def _el_facts(self):
-        return self.v_el_test.get() == EL_TESTS[1]
+        return self.v_el_test.get() == EL_TESTS[2]
 
     def _el_mode(self):
         facts = self._el_facts()
         for w in self._el_fact_widgets + [self.el_trace]:
             w.grid() if facts else w.grid_remove()
+        task = ERRP_TASKS.get(self.v_el_test.get())
+        for w in self._el_arrow_widgets:
+            w.grid_remove() if facts else w.grid()
+        for w in self._el_wait_widgets:
+            w.grid() if task == "cursor" else w.grid_remove()
         self.el_trials_lbl.config(text="Facts" if facts else "Trials")
         self.el_rate_lbl.config(text="False share" if facts else "Error rate")
         if facts:
@@ -1169,10 +1300,18 @@ class EEGTab(ttk.Frame):
                                      "0.1 s; a statement counts as ERROR when its peak (or mean) "
                                      "P(error) reaches the threshold.")
             self.el_cue.config(text="Statements — read silently; don’t answer aloud or move")
+        elif task == "cursor":
+            self.el_help.config(text="Test a trained ErrP model on live EEG. Press ← or → "
+                                     "toward the blue box; the cursor sometimes moves the wrong way. "
+                                     "Each move is classified from the live stream and scored "
+                                     "against what actually happened.")
+            self.el_cue.config(text="Task — press ← / → toward the blue box; keep the "
+                                    "rest of your body still")
         else:
-            self.el_help.config(text="Test a trained ErrP model on live EEG. The feedback task runs "
-                                     "on the right; each outcome is classified from the live stream "
-                                     "and scored against what was actually shown.")
+            self.el_help.config(text="Test a trained ErrP model on live EEG. A target arrow shows, "
+                                     "then the outcome arrow, which sometimes points the other way. "
+                                     "Each outcome is classified from the live stream and scored "
+                                     "against what was actually shown.")
             self.el_cue.config(text="Cue — watch here; react naturally to wrong outcomes, "
                                     "but don’t move")
         self._el_render()
@@ -1210,7 +1349,10 @@ class EEGTab(ttk.Frame):
             model, meta = models.load_model(e["folder"])
         except Exception as ex:
             messagebox.showerror("Model error", str(ex)); return
-        self._warn_old_filter(meta, e["folder"].name)
+        if getattr(model, "method", "") != ErrPModel.method:
+            messagebox.showinfo("Retrain", f"{e['folder'].name} uses the old ErrP pipeline, which "
+                                "can't see the error response on this headset. Retrain it "
+                                "(Train → EEG → ErrP)."); return
         cols = self._model_cols(meta, e["folder"].name)
         if cols is None:
             return
@@ -1244,11 +1386,13 @@ class EEGTab(ttk.Frame):
         self._errp_task_start(
             int(self.el_trials.get()), float(self.el_rate.get()), self.el_canvas,
             on_event=lambda lab, ts: self.engine.mark_live_event(lab, ts),
-            # the last outcome needs ~1.8 s more EEG before it can be classified
+            # the last outcome needs ~0.8 s more EEG before it can be classified
             on_done=lambda: self.after(1500, lambda: self._el_finish(rid)),
-            on_progress=lambda k, n: self.el_status.config(text=f"trial {k}/{n}",
-                                                           foreground="#555"),
-            lead_ms=3000)       # buffer EEG first so even trial 1 has filter context
+            on_progress=lambda k, n, note="": self.el_status.config(
+                text=f"trial {k}/{n}" + (f"  ({note})" if note else ""), foreground="#555"),
+            lead_ms=3000,       # buffer EEG first so even trial 1 has filter context
+            task=ERRP_TASKS[self.v_el_test.get()],
+            **self._errp_times(self.el_wait_s, self.el_outcome_s))
 
     def _el_fact_start(self, label, text, ts):
         self._el_fact_q.append(text)
@@ -1374,15 +1518,16 @@ class EEGTab(ttk.Frame):
 
         cv = self.el_bar; cv.delete("all")
         W = cv.winfo_width() if cv.winfo_width() > 1 else 320
-        last = next(((r["label"], self._el_score(r)) for r in reversed(self._el_res)
+        last = next(((k + 1, r["label"], self._el_score(r))
+                     for k, r in reversed(list(enumerate(self._el_res)))
                      if self._el_score(r) is not None), None)
         if last:
-            lab, p = last
+            k, lab, p = last
             pred = "error" if p >= thr else "correct"
             cv.create_rectangle(0, 0, int(W * p), 18, width=0,
                                 fill="#e74c3c" if p >= thr else "#2ecc40")
             score = f"{self.v_el_score.get()} P(error)" if facts else "P(error)"
-            self.el_last.config(text=f"last: {shown[lab]}  →  {score} {p:.2f}  "
+            self.el_last.config(text=f"last: #{k} {shown[lab]}  →  {score} {p:.2f}  "
                                      f"({'ok' if pred == lab else 'MISS'})",
                                 foreground="#1e8449" if pred == lab else "#c0392b")
         else:

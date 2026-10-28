@@ -1,6 +1,6 @@
-"""EEG paradigm models: MI (CSP+LDA), ERD gate, and ErrP (ERP + shrinkage LDA).
+"""EEG paradigm models: MI (CSP + pluggable classifier) and ErrP (xDAWN + Riemannian tangent space).
 
-All three are small, CPU-fast classical pipelines. They consume *epochs* (lists of
+Both are small, CPU-fast classical pipelines. They consume *epochs* (lists of
 (n_times, n_channels) arrays) that the training code has already band-passed for the
 paradigm's band. Each saves/loads via joblib.
 """
@@ -9,7 +9,9 @@ from __future__ import annotations
 from pathlib import Path
 import numpy as np
 import joblib
-from scipy.signal import butter, sosfiltfilt, sosfilt, sosfilt_zi
+from scipy.linalg import eigh
+from scipy.signal import butter, sosfilt, sosfilt_zi
+from sklearn.covariance import ledoit_wolf
 from sklearn.preprocessing import StandardScaler
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis as LDA
 from sklearn.svm import SVC
@@ -41,17 +43,6 @@ def make_classifier(name: str):
 
 
 # ---------------- shared signal helpers ----------------
-def bandpass(sig: np.ndarray, fs: float, lo: float, hi: float, order: int = 4) -> np.ndarray:
-    """Zero-phase band-pass of a continuous signal (n_samples, n_channels)."""
-    nyq = fs / 2.0
-    hi = min(hi, nyq * 0.99)
-    sos = butter(order, [lo / nyq, hi / nyq], btype="band", output="sos")
-    n = sig.shape[0]
-    if n <= 3 * (2 * order + 1):        # too short for filtfilt padding
-        return sig - sig.mean(axis=0, keepdims=True)
-    return sosfiltfilt(sos, sig, axis=0)
-
-
 class StreamBandpass:
     """Causal (forward-only) Butterworth band-pass for a live stream, fed chunk by chunk.
 
@@ -150,66 +141,61 @@ class MIModel:
         return joblib.load(path)
 
 
-# ---------------- ERD gate: band-power + LDA (rest vs active) ----------------
-class ERDGate:
-    kind = "erd"
-
-    def __init__(self):
-        self.scaler = StandardScaler()
-        self.clf = LDA()
-
-    @staticmethod
-    def _feat(epochs):
-        # epochs already band-passed to mu+beta -> log band-power per channel
-        return np.asarray([np.log(np.var(X, axis=0) + 1e-12) for X in epochs])
-
-    def fit(self, epochs, y):
-        F = self._feat(epochs)
-        self.clf.fit(self.scaler.fit_transform(F), y)   # y: 0 rest, 1 active
-        return self
-
-    def proba_active(self, epochs):
-        return self.predict_proba(epochs)[:, 1]
-
-    def predict_proba(self, epochs):
-        return self.clf.predict_proba(self.scaler.transform(self._feat(epochs)))
-
-    def save(self, path):
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        joblib.dump(self, path)
-
-    @staticmethod
-    def load(path):
-        return joblib.load(path)
-
-
-# ---------------- ErrP: time-binned ERP + shrinkage LDA ----------------
 class ErrPModel:
+    """xDAWN spatial filters + Riemannian tangent space + logistic regression.
+
+    The approach of the BCI Challenge @ NER 2015 winners (Barachant et al.) for feedback-error
+    detection. On this headset ~95% of the 1-10 Hz power is common to all channels (the ear
+    reference's own activity), which buries the error response; xDAWN (Rivet et al. 2009) learns
+    spatial filters that pull out the class-specific evoked response. Each epoch is stacked under
+    the two class prototypes (filtered averages), its shrunk covariance is mapped to the tangent
+    space at the training mean, and a balanced logistic regression gives P(error).
+    """
     kind = "errp"
+    method = "xdawn+riemann"
 
-    def __init__(self, n_bins: int = 12):
-        self.n_bins = n_bins
-        self.scaler = StandardScaler()
-        self.clf = LDA(solver="lsqr", shrinkage="auto", priors=[0.5, 0.5])
+    def __init__(self, n_filters: int = 2):
+        self.n_filters = n_filters                 # xDAWN filters per class
+        self.clf = LogisticRegression(C=1.0, class_weight="balanced", max_iter=2000)
 
-    def _feat(self, epochs):
-        rows = []
-        for X in epochs:
-            n = X.shape[0]
-            edges = np.linspace(0, n, self.n_bins + 1).astype(int)
-            bins = [X[edges[i]:edges[i + 1]].mean(axis=0) for i in range(self.n_bins)]
-            rows.append(np.concatenate(bins))      # (n_bins * n_ch,)
-        return np.asarray(rows)
+    def _xdawn(self, X, y):
+        C = np.mean([e.T @ e for e in X], axis=0)
+        C = C + 1e-9 * np.trace(C) * np.eye(len(C))
+        W = []
+        for c in (0, 1):                           # maximise evoked / total power, per class
+            A = X[y == c].mean(axis=0)
+            d, V = eigh(A.T @ A, C)
+            W.append(V[:, np.argsort(d)[::-1][:self.n_filters]])
+        return np.hstack(W)
 
-    def fit(self, epochs, y):
-        self.clf.fit(self.scaler.fit_transform(self._feat(epochs)), y)  # y: 0 correct, 1 error
+    def _covs(self, X):
+        return np.array([ledoit_wolf(np.vstack([self.P_, (e @ self.W_).T]).T)[0] for e in X])
+
+    def _tangent(self, covs):
+        n = covs.shape[1]
+        iu = np.triu_indices(n)
+        w = np.where(iu[0] == iu[1], 1.0, np.sqrt(2.0))
+        out = []
+        for C in covs:
+            d, V = eigh(self.iref_ @ C @ self.iref_)
+            out.append(((V * np.log(np.maximum(d, 1e-12))) @ V.T)[iu] * w)
+        return np.asarray(out)
+
+    def fit(self, epochs, y):                      # y: 0 correct, 1 error
+        X, y = np.asarray(epochs, dtype=float), np.asarray(y)
+        self.W_ = self._xdawn(X, y)
+        self.P_ = np.vstack([(X[y == c].mean(axis=0) @ self.W_).T for c in (0, 1)])
+        covs = self._covs(X)
+        d, V = eigh(covs.mean(axis=0))
+        self.iref_ = (V / np.sqrt(np.maximum(d, 1e-12))) @ V.T
+        self.clf.fit(self._tangent(covs), y)
         return self
 
     def proba_error(self, epochs):
         return self.predict_proba(epochs)[:, 1]
 
     def predict_proba(self, epochs):
-        return self.clf.predict_proba(self.scaler.transform(self._feat(epochs)))
+        return self.clf.predict_proba(self._tangent(self._covs(np.asarray(epochs, dtype=float))))
 
     def save(self, path):
         Path(path).parent.mkdir(parents=True, exist_ok=True)

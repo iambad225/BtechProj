@@ -1,5 +1,5 @@
 modality: eeg
-subject: subject
+subject: amogh_errp_trial_1
 board: cyton
 sample_rate: 250
 source:
@@ -43,8 +43,8 @@ electrodes:
 - channel: 2
   name: FC6
   role: data
-window_ms: 2000
-step_ms: 500
+window_ms: 1000
+step_ms: 250
 transient_ms: 400
 labels: []
 model_type: lda
@@ -74,4 +74,4 @@ alpha_electrodes:
 - P3
 - P4
 alpha_threshold: 0.2
-paradigm: mi
+paradigm: errp

@@ -16,14 +16,6 @@ import numpy as np
 _SINGLE_CH = ("MAV", "RMS", "WL", "ZC", "SSC", "VAR")
 
 
-def feature_names(n_channels: int) -> list[str]:
-    names = [f"{feat}_ch{c}" for feat in _SINGLE_CH for c in range(n_channels)]
-    for i in range(n_channels):
-        for j in range(i + 1, n_channels):
-            names.append(f"CORR_{i}{j}")
-    return names
-
-
 def feature_dim(n_channels: int) -> int:
     return len(_SINGLE_CH) * n_channels + n_channels * (n_channels - 1) // 2
 
