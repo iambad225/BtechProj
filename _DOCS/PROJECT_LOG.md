@@ -198,6 +198,7 @@
     - Old model folders under `biopipe/models/` are still on disk and still listed (found by the modality in their JSON) until deleted
     - Recording folders keep their own `<modality>_<subject>_<stamp>` names
     - Tested on the real cursor recordings: subject empty after selecting, save refused without it (even with a Name), `Amogh_cursor_bal0.75` saved and listed with subject `Amogh` in its JSON
+  - All work since 27a35c3 (stop recording, per-model ErrP window, two-stage MI, MI validation folder, model naming) committed as `0fdd858` on `main` and pushed to GitHub; the deleted roadmap PDF, the `4channel emg acquisition` submodule change and the root `eeg_config.yaml` left out
 
 ## Current state
 
