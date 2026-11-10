@@ -1,7 +1,7 @@
 """Unified Train tab: build a model from one or more recorded sessions.
 
 EMG -> multi-label gesture classifier (band-power/Hudgins features).
-EEG -> pick a paradigm: MI (CSP+LDA), ERD gate (band-power+LDA), or ErrP (ERP+LDA).
+EEG -> pick a paradigm: MI (two stages: rest vs MI, then left vs right) or ErrP (xDAWN + Riemann).
 Only compatible recordings can be pooled (same electrode->channel map, sample rate, labels).
 """
 from __future__ import annotations
@@ -14,17 +14,18 @@ from tkinter import ttk, messagebox
 from core.config import Config, FilterConfig, Electrode
 from core import training as emg_training
 from core import eeg_training
+from core.eeg_models import MI_FEATURES
 import storage.recordings as recordings
 import storage.models as models
-from storage.schema import ModelMeta, ChannelInfo, now_iso
+from storage.schema import ModelMeta, ChannelInfo, now_iso, name_token
 
 # EEG paradigm -> (label shown, recording tag it trains from, features name)
-# Two models total: MI (rest/left/right, gate folded in) and ErrP.
+# MI: rest vs MI (gate), then left vs right - one model with two stages. ErrP: event-locked.
 EEG_PARADIGMS = {
-    "MI (rest/L/R)": ("mi", "mi", "csp"),
+    "MI (2-stage)": ("mi", "mi", "riemann"),
     "ErrP": ("errp", "errp", "xdawn+riemann"),
 }
-MI_LABEL = "MI (rest/L/R)"
+MI_LABEL = "MI (2-stage)"
 
 
 def _cfg_from_meta(meta, window_ms, step_ms, paradigm="") -> Config:
@@ -63,17 +64,22 @@ class TrainTab(ttk.Frame):
         self.par_combo.bind("<<ComboboxSelected>>", lambda e: self._on_paradigm())
         self.lbl_model = ttk.Label(top, text="Model:")
         self.lbl_model.grid(row=0, column=4, padx=(8, 0))
+        # MI features (EEG MI only): riemann tangent space (default) or CSP
+        self.v_feat = tk.StringVar(value=MI_FEATURES[0])
+        self.feat_combo = ttk.Combobox(top, textvariable=self.v_feat, state="readonly", width=8,
+                                       values=list(MI_FEATURES))
+        self.feat_combo.grid(row=0, column=5, padx=2)
         self.v_model = tk.StringVar(value="lda")
         self.model_combo = ttk.Combobox(top, textvariable=self.v_model, state="readonly", width=8,
                                         values=["lda", "svm", "logreg", "rf", "tree"])
-        self.model_combo.grid(row=0, column=5, padx=2)
+        self.model_combo.grid(row=0, column=6, padx=2)
         self.v_win = tk.StringVar(value="150"); self.v_step = tk.StringVar(value="40")
         self._win_widgets = [ttk.Label(top, text="Win/Step ms:"),
                              ttk.Entry(top, textvariable=self.v_win, width=6),
                              ttk.Entry(top, textvariable=self.v_step, width=6)]
-        for col, w in zip((6, 7, 8), self._win_widgets):
-            w.grid(row=0, column=col, padx=(8, 2) if col == 6 else 2)
-        ttk.Button(top, text="↻ Refresh", command=self._refresh).grid(row=0, column=9, padx=(8, 0))
+        for col, w in zip((7, 8, 9), self._win_widgets):
+            w.grid(row=0, column=col, padx=(8, 2) if col == 7 else 2)
+        ttk.Button(top, text="↻ Refresh", command=self._refresh).grid(row=0, column=10, padx=(8, 0))
 
         lf = ttk.LabelFrame(self, text="Recordings (Ctrl/Shift-click to pool)", padding=6)
         lf.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
@@ -89,18 +95,33 @@ class TrainTab(ttk.Frame):
         self.meta_text.grid(row=0, column=0, sticky="nsew")
 
         bottom = ttk.Frame(self); bottom.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
-        bottom.columnconfigure(3, weight=1)
+        bottom.columnconfigure(7, weight=1)
         self.compat = ttk.Label(bottom, text="", foreground="#555")
-        self.compat.grid(row=0, column=0, columnspan=4, sticky="w")
+        self.compat.grid(row=0, column=0, columnspan=8, sticky="w")
         self.train_btn = ttk.Button(bottom, text="Train", command=self._train)
         self.train_btn.grid(row=1, column=0, sticky="w", pady=6)
-        ttk.Label(bottom, text="Description:").grid(row=1, column=1, padx=(10, 2))
-        self.v_desc = tk.StringVar()
-        ttk.Entry(bottom, textvariable=self.v_desc, width=34).grid(row=1, column=2)
+        # model name = <subject>_<name>_<scores>: the subject is typed in and required
+        ttk.Label(bottom, text="Subject*:").grid(row=1, column=1, padx=(10, 2))
+        self.v_subject = tk.StringVar()
+        ttk.Entry(bottom, textvariable=self.v_subject, width=20).grid(row=1, column=2)
+        ttk.Label(bottom, text="Name:").grid(row=1, column=3, padx=(10, 2))
+        self.v_name = tk.StringVar()
+        ttk.Entry(bottom, textvariable=self.v_name, width=20).grid(row=1, column=4)
+        self.v_scores = tk.BooleanVar(value=True)
+        ttk.Checkbutton(bottom, text="+ scores", variable=self.v_scores).grid(row=1, column=5,
+                                                                            padx=(8, 0))
         self.save_btn = ttk.Button(bottom, text="Save model", command=self._save, state="disabled")
-        self.save_btn.grid(row=1, column=3, sticky="w", padx=10)
+        self.save_btn.grid(row=1, column=6, sticky="w", padx=10)
+        ttk.Label(bottom, text="Description:").grid(row=2, column=1, padx=(10, 2), sticky="e")
+        self.v_desc = tk.StringVar()
+        ttk.Entry(bottom, textvariable=self.v_desc, width=50).grid(row=2, column=2, columnspan=4,
+                                                                   sticky="w")
+        self.name_lbl = ttk.Label(bottom, text="", foreground="#555")
+        self.name_lbl.grid(row=3, column=0, columnspan=8, sticky="w", pady=(4, 0))
         self.metrics_lbl = ttk.Label(bottom, text="", foreground="#0a7")
-        self.metrics_lbl.grid(row=2, column=0, columnspan=4, sticky="w")
+        self.metrics_lbl.grid(row=4, column=0, columnspan=8, sticky="w")
+        for v in (self.v_subject, self.v_name, self.v_scores):
+            v.trace_add("write", lambda *a: self._show_name())
 
         self._on_modality()
         self.after(120, self._tick)
@@ -112,10 +133,11 @@ class TrainTab(ttk.Frame):
     def _on_modality(self):
         if self._is_eeg():
             self.par_combo.grid()
-            self.v_win.set("1000"); self.v_step.set("250")
+            # 2 s windows beat 1 s on both MI stages (PhysioNet check); a new decision every 0.5 s
+            self.v_win.set("2000"); self.v_step.set("500"); self.v_model.set("logreg")
         else:
             self.par_combo.grid_remove()
-            self.v_win.set("150"); self.v_step.set("40")
+            self.v_win.set("150"); self.v_step.set("40"); self.v_model.set("lda")
         self._update_model_vis()
         self._refresh()
 
@@ -126,9 +148,11 @@ class TrainTab(ttk.Frame):
     def _update_model_vis(self):
         """Classifier picker and Win/Step for EMG and EEG MI; ErrP has a fixed pipeline and
         cuts one fixed epoch per outcome, so neither applies to it."""
-        show = (not self._is_eeg()) or (self.v_par.get() == MI_LABEL)
+        mi = self._is_eeg() and self.v_par.get() == MI_LABEL
+        show = (not self._is_eeg()) or mi
         for w in [self.lbl_model, self.model_combo] + self._win_widgets:
             w.grid() if show else w.grid_remove()
+        self.feat_combo.grid() if mi else self.feat_combo.grid_remove()
 
     def _eeg_paradigm(self):
         return EEG_PARADIGMS[self.v_par.get()]           # (name, source_tag, features)
@@ -149,6 +173,7 @@ class TrainTab(ttk.Frame):
         self._trained = None
         self.save_btn.config(state="disabled")
         self.metrics_lbl.config(text="")
+        self._show_name()
 
     def _selected_metas(self):
         return [self._entries[i]["meta"] for i in self.rec_list.curselection()]
@@ -172,6 +197,35 @@ class TrainTab(ttk.Frame):
         else:
             self.compat.config(text=f"{len(metas)} selected", foreground="#555")
 
+    @staticmethod
+    def _scores_text(metrics):
+        """Headline score(s) for the name: both stages for two-stage MI, balanced accuracy for
+        other EEG models, subset accuracy for EMG."""
+        st = metrics.get("stages")
+        if st and None not in (st["gate"].get("balanced_accuracy"),
+                               st["side"].get("balanced_accuracy")):
+            return (f"gate{st['gate']['balanced_accuracy']:.2f}"
+                    f"_side{st['side']['balanced_accuracy']:.2f}")
+        if "balanced_accuracy" in metrics:
+            ba = metrics["balanced_accuracy"]
+            return "nocv" if ba is None else f"bal{ba:.2f}"
+        return f"acc{float(metrics.get('accuracy', 0.0)):.2f}"
+
+    def _model_name(self):
+        """<subject>_<name>_<scores>; the name and scores parts are optional."""
+        scores = ""
+        if self.v_scores.get():
+            scores = self._scores_text(self._trained[1].metrics) if self._trained else "<scores>"
+        parts = [name_token(self.v_subject.get()), name_token(self.v_name.get()), scores]
+        return "_".join(p for p in parts if p)
+
+    def _has_subject(self):
+        return bool(name_token(self.v_subject.get()))
+
+    def _show_name(self):
+        self.name_lbl.config(text=f"Saves as:  {self._model_name()}" if self._has_subject()
+                             else "Saves as:  (type the subject - required)")
+
     # ---- train ----
     def _train(self):
         metas = self._selected_metas()
@@ -188,10 +242,11 @@ class TrainTab(ttk.Frame):
         self.metrics_lbl.config(text="Training...", foreground="#555")
         folders = [self._entries[i]["folder"] for i in self.rec_list.curselection()]
         args = (folders, metas, win, step, self.v_mod.get(),
-                (self._eeg_paradigm() if self._is_eeg() else None), self.v_model.get())
+                (self._eeg_paradigm() if self._is_eeg() else None), self.v_model.get(),
+                self.v_feat.get())
         threading.Thread(target=self._train_worker, args=args, daemon=True).start()
 
-    def _train_worker(self, folders, metas, win, step, modality, eeg_par, model_type):
+    def _train_worker(self, folders, metas, win, step, modality, eeg_par, model_type, mi_feats):
         try:
             sessions = [recordings.load_session(f) for f in folders]  # (sig, labels, trials, meta)
             m0 = metas[0]
@@ -199,8 +254,9 @@ class TrainTab(ttk.Frame):
                 pname, src_tag, feats = eeg_par
                 cfg = _cfg_from_meta(m0, win, step, paradigm=pname)
                 if pname == "mi":
-                    cfg.model_type = model_type          # chosen classifier on CSP features
-                    feats = f"csp+{model_type}"
+                    cfg.model_type = model_type          # chosen classifier ...
+                    cfg.mi_features = mi_feats           # ... on riemann or CSP features
+                    feats = f"{mi_feats}+{model_type}"
                 else:
                     model_type = pname                   # errp: fixed pipeline
                 model, metrics = eeg_training.train_paradigm(
@@ -237,6 +293,7 @@ class TrainTab(ttk.Frame):
                 if kind == "done":
                     model, meta, metrics = rest
                     self._trained = (model, meta)
+                    self._show_name()
                     self.metrics_lbl.config(text=self._fmt_metrics(metrics), foreground="#0a7")
                     self._show_report(metrics)
                     self.save_btn.config(state="normal")
@@ -250,10 +307,17 @@ class TrainTab(ttk.Frame):
 
     def _fmt_metrics(self, m):
         if "balanced_accuracy" in m:      # EEG (k-fold CV)
-            clf = f" [{m['classifier']}]" if m.get("classifier") else ""
+            clf = (f" [{m['features']}+{m['classifier']}]" if m.get("features")
+                   else f" [{m['classifier']}]" if m.get("classifier") else "")
             if m.get("balanced_accuracy") is None:
                 return (f"{m['paradigm'].upper()}{clf}: "
                         f"{m.get('note', 'not enough trials for CV')}")
+            st = m.get("stages")
+            if st:                        # two-stage MI: each stage's own score first
+                return (f"MI{clf}: rest vs MI {st['gate'].get('balanced_accuracy')}  ·  "
+                        f"left vs right {st['side'].get('balanced_accuracy')}  ·  overall "
+                        f"{m['balanced_accuracy']} (balanced acc, {m.get('cv_folds')}-fold grouped"
+                        f" CV)  ·  {m.get('n_trials', '?')} trials  — report at right")
             return (f"{m['paradigm'].upper()}{clf}: balanced acc {m['balanced_accuracy']}"
                     f"±{m.get('balanced_accuracy_std')} ({m.get('cv_folds')}-fold grouped CV)  "
                     f"macro-F1 {m.get('macro_f1')}  ·  {m.get('n_trials', '?')} trials"
@@ -272,6 +336,18 @@ class TrainTab(ttk.Frame):
     def _report_text(self, m):
         per = m.get("per_class") or {}
         lines = []
+        if m.get("stages"):               # two-stage MI: a block per stage, then the cascade
+            for title, key in (("STAGE 1  rest vs MI (gate)", "gate"),
+                               ("STAGE 2  left vs right (MI windows)", "side")):
+                st = m["stages"][key]
+                lines += [title]
+                if st.get("balanced_accuracy") is None:
+                    lines += ["  " + st.get("note", "too few trials for CV"), ""]
+                    continue
+                lines += [f"  balanced accuracy : {st['balanced_accuracy']} "
+                          f"± {st.get('balanced_accuracy_std')}"]
+                lines += self._class_rows(st.get("per_class") or {}, indent="  ") + [""]
+            lines += ["OVERALL  rest / left / right (both stages)"]
         if "balanced_accuracy" in m:      # EEG
             if m.get("balanced_accuracy") is None:
                 return m.get("note", "Not enough trials for cross-validation.")
@@ -289,21 +365,33 @@ class TrainTab(ttk.Frame):
                       f"subset accuracy : {m.get('accuracy')} ± {m.get('accuracy_std')}",
                       f"macro F1        : {m.get('macro_f1')}",
                       f"windows / trials: {m.get('n_windows')} / {m.get('n_trials')}"]
-        lines += ["", f"{'class':<14}{'prec':>7}{'rec':>7}{'f1':>7}{'supp':>8}", "-" * 43]
+        return "\n".join(lines + [""] + self._class_rows(per))
 
+    @staticmethod
+    def _class_rows(per, indent=""):
+        """Per-class precision / recall / f1 / support table lines."""
         def fx(x):
             return "  -  " if x is None else f"{x:.3f}"
+        rows = [f"{indent}{'class':<14}{'prec':>7}{'rec':>7}{'f1':>7}{'supp':>8}", indent + "-" * 43]
         for name, v in per.items():
-            lines.append(f"{str(name):<14}{fx(v.get('precision')):>7}{fx(v.get('recall')):>7}"
-                         f"{fx(v.get('f1')):>7}{int(v.get('support', 0)):>8}")
-        return "\n".join(lines)
+            rows.append(f"{indent}{str(name):<14}{fx(v.get('precision')):>7}"
+                        f"{fx(v.get('recall')):>7}{fx(v.get('f1')):>7}{int(v.get('support', 0)):>8}")
+        return rows
 
     def _save(self):
         if not self._trained:
             return
+        if not self._has_subject():
+            messagebox.showinfo("Subject", "Type the subject's name before saving the model.")
+            return
+        name = self._model_name()
+        if models.model_exists(name) and not messagebox.askyesno(
+                "Model exists", f"A model named\n{name}\nalready exists. Replace it?"):
+            return
         model, meta = self._trained
         meta.description = self.v_desc.get().strip()
-        folder = models.save_model(model, meta)
+        meta.subject = self.v_subject.get().strip()
+        folder = models.save_model(model, meta, name)
         self.metrics_lbl.config(text=f"Saved model -> {folder.name}", foreground="#0a7")
         self.save_btn.config(state="disabled")
 

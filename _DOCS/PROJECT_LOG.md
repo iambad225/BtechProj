@@ -147,12 +147,62 @@
     - Speaker report: new "Concepts explained simply" section (xDAWN, prototypes, covariance, Riemannian / tangent space, logistic regression, p-value) with analogies, linked from Slides 10–11
   - Branch check: cursor recordings (28 Oct 18:57–19:03) were made with the uncommitted working tree on `errp-live-timing`; `main` (`ef96edf`) has no cursor task, ErrP Live or stream clock — branch kept, not deleted
   - All work committed on `errp-live-timing`, `main` fast-forwarded to it and pushed to GitHub; the merged `errp-live-timing` branch deleted (local only, never pushed)
+
+- **2026-10-29 — xDAWN visualisation** (no code changes)
+  - Figures `_DOCS/errp_xdawn_single_trial.png` and `_DOCS/errp_xdawn_averages.png`: C3 / Cz / C4 without and with xDAWN (channels rebuilt from the 4 components), markers, baseline and training epoch, on the 3 real cursor sessions
+  - xDAWN keeps ~20% of the epoch power; after it, error trials show a clear negativity ≈ 0.38 s (−1.0 to −1.3 µV) that correct trials don't, with much tighter error bands; filters fitted on the same trials, so the picture is in-sample (the 0.78 CV score is the honest measure)
+  - Step-by-step figures `_DOCS/errp_step0_input.png`, `errp_step1_xdawn.png`, `errp_step23_riemann.png`, `errp_step4_logreg.png`: input, xDAWN recipes + signals, mean 12 × 12 covariances and their difference + tangent-space scatter, out-of-fold P(error) per trial
+    - Cross-validated balanced accuracy after each step: raw channels 0.55 → after xDAWN 0.74 → + covariance / tangent space / logistic regression 0.78; out-of-fold 76% of errors caught, 80% of correct trials passed
+  - **Stop recording** button on the EEG and EMG Record tabs (Monitor, Live and ErrP Live already had Start/Stop): the record button becomes "■ Stop recording" while a session runs; stopping asks Yes = save what was recorded, No = discard, Cancel = carry on; an ErrP task stops at once
+    - Tested on replayed real EEG (EMG recorder fed 4 real EEG channels, as no EMG recordings exist): saved data identical to the streamed samples; discard saves nothing; Cancel keeps recording; ErrP stop after 5 trials saved exactly 5 markers
+  - ErrP analysis-window test (real cursor data, 5 repeated grouped 5-fold CVs + held-out sessions; report only, not implemented): +0.4 s 0.75 · **+0.5 s 0.80 ± 0.02 (held-out 0.74 / 0.85 / 0.82; label-shuffle p = 0.01)** · +0.6 s 0.79 · +0.7 s 0.78 · +0.8 s (current) 0.78 · +1.0 s 0.78 — 0.5 s is as accurate and gives the verdict 0.3 s sooner; 0.4 s cuts off the dip
+  - **ErrP window default changed to −0.2…+0.5 s** (was +0.8 s); no running-average wave added (user's choice)
+    - Each model stores its epoch end (`ErrPModel.tmax`); ErrP Live and the facts test cut each model's own window, so older 0.8 s models still run correctly; outcome display minimum stays 0.8 s
+    - Verified on real data: app training uses 175-sample epochs; ErrP Live on a replayed held-out session — 0.5 s model verdict 0.52–0.56 s after the move, 0.8 s model 0.83–0.87 s; live = offline (≈1e-15) for both
+    - Same 180 trials, 5 repeated splits: raw channels 0.51 → after xDAWN 0.78 → full model 0.80
+    - All ErrP figures re-rendered for the 0.5 s window; README, methodology PDF and speaker notes updated (method table on the results slide kept, labelled as the 0.8 s comparison)
+  - Stage 3 deck: new slide 13 "What xDAWN Reveals: The Error Response" (C3 / Cz / C4 averages with and without xDAWN); deck now 20 slides
+  - **Window reverted to −0.2…+0.8 s** at the user's request (they wanted the original averages figure); the per-model window (`ErrPModel.tmax`) is kept, so any 0.5 s model still runs correctly
+    - Code, README, methodology PDF, all ErrP figures, deck text and speaker notes back on 0.8 s; slide 13 uses the averages figure as first shown (xDAWN fitted on 0.8 s epochs, dip at ≈0.38 s); step numbers back to 55% → 74% → 78% (the app's split, matching the results table)
+    - Verified: training uses 250-sample epochs again, model.tmax 0.8
+  - Live waveform viability (held-out session played in order): single-trial signal-to-noise ≈ 0.8, so one trial's wave is unreadable; a running error-vs-correct average shows the dip clearly after ~20 trials of each kind (2.6 standard errors) — figure `_DOCS/errp_live_wave_viability.png`
+  - Stage 3 deck: four new slides (11–14), one step figure each with short plain-language bullets, between the algorithm and results slides; slide versions of the figures re-rendered with larger text on white (`slide_errp_step*.png`); deck now 19 slides, compiled and checked; speaker report given notes for Slides 11–14, renumbered, timing plan updated
   - Speaker report also produced as PDF (`mid_sem_speaker_report.pdf`, 12 pages, same styling as the methodology PDF); regenerate after editing the `.md` with `python _DOCS/source/build_speaker_report.py`
+
+- **2026-11-09 — Two-stage MI model + public-data validation**
+  - MI is now **two stages**, each trained and scored on its own: stage 1 rest vs MI (either hand), stage 2 left vs right (MI windows only); live decision = rest unless stage 1 says MI, then the likelier side; the planned EMG wrist clench will replace stage 1 later (stage 2 then runs alone)
+    - Each stage: 2 s window's 8×8 covariance → Riemannian tangent space at the training mean → class-balanced logistic regression (Barachant et al. 2012); CSP + LDA still selectable
+    - All MI classifiers weight classes equally (stage 1 sees twice as many MI windows as rest windows)
+    - The old single 3-class one-vs-rest CSP model removed (no MI models had been saved)
+    - Riemannian helpers shared with the ErrP model; ErrP result unchanged (0.777 on the cursor sessions)
+  - Train tab: paradigm `MI (2-stage)`; new **features** picker (`riemann` default / `csp`); EEG defaults logreg, Win/Step 2000 / 500 ms (2 s beat 1 s on both stages); report shows stage 1, stage 2, then combined rest / left / right, each with a per-class table
+  - Live tab: a two-stage model shows stage 1 (rest / MI) and stage 2 (left / right) bars and e.g. `→ mi_left  MI 72% · side 64%`
+  - Record tab: MI **Reps** default 10 (≈ 3 min), up to 40 (was 6, max 15)
+  - **Public-data validation** — new folder `_DOCS/mi_validation_physionet/` (short doc `README.md`, script, `results/`), tracked in git except the downloaded data
+    - PhysioNet EEG Motor Movement/Imagery, subjects S001–S005, imagined left/right fist + rest (runs 4, 8, 12; 15 EDF files, 37 MB, downloaded with the user's permission), only our 8 electrodes, scored through the app's own `train_mi`
+    - Mean of 5 subjects: stage 1 **0.74**, stage 2 **0.69**, rest / left / right 0.58 (old single 3-class model 0.55); trained on 2 runs and tested on the unseen 3rd: 0.71 / 0.69
+    - Best subjects: 0.91 (stage 1, S004) and 0.83 (stage 2, S001); 85% is reached by individuals, not on average; S003 at chance for left/right
+    - Left/right accuracy follows how lateralised a person's ERD is (C3 vs C4 power drop), almost in rank order
+    - 1 s windows 0.68 / 0.64, 3 s 0.77 / 0.70; all 64 electrodes 0.82 / 0.62 (overfits left/right with ~22 trials per hand); C3 Cz C4 only 0.63 / 0.55; our 8-electrode montage is a good choice
+  - Tested on real data through the GUI code: PhysioNet runs saved in the app's recording format, trained in the Train tab, model started from the Live tab and a held-out run replayed — live = offline exactly, held-out gate 0.71 / side 0.79
+
+- **2026-11-10 — Model naming (EEG and EMG)**
+  - Models are no longer named after the selected recordings: the Train tab has **Subject**, **Name** and **+ scores** fields, and the model saves as `<subject>_<name>_<scores>`; a live *Saves as:* line shows the name before saving
+    - Subject is pre-filled from the selected recordings (their shared start when they differ, e.g. `amogh_errp_trial`); the user's own edit is kept when the selection changes; the subject is also written into the model's JSON
+    - Scores: `gate0.74_side0.69` for two-stage MI, `bal0.78` for other EEG models, `acc0.91` for EMG; untick **+ scores** to leave them out
+    - Letters, digits, `.`, `_`, `-` are kept (case too); other characters become `-`; saving over an existing name asks before replacing it; an empty subject and name is refused
+  - The Live, ErrP Live and EMG Live lists now find models by the modality in each model's JSON instead of the `eeg_` / `emg_` folder prefix, so old automatically named models still appear
+  - Tested on the real cursor recordings, copied into a scratch folder: pre-filled subject, preview, train, save, load, replace (No keeps / Yes replaces), scores off, empty name refused; the new and an old-style model both listed in Live and ErrP Live, none in EMG
+  - Follow-up (user request): **Subject is now typed in by hand and required** (marked `Subject*`, no pre-fill from the recordings); **Save model** refuses an empty subject even when a Name is given
+  - **Old automatic naming removed everywhere** (`ModelMeta.folder_name` / `accuracy` deleted; `save_model` needs a name); the user will retrain the models
+    - Old model folders under `biopipe/models/` are still on disk and still listed (found by the modality in their JSON) until deleted
+    - Recording folders keep their own `<modality>_<subject>_<stamp>` names
+    - Tested on the real cursor recordings: subject empty after selecting, save refused without it (even with a Name), `Amogh_cursor_bal0.75` saved and listed with subject `Amogh` in its JSON
 
 ## Current state
 
 - **EEG tab subtabs:** Config · Monitor · Record · Live · ErrP Live (arrow feedback or true/false facts test)
-- **EEG models:** 3-class MI (CSP + pluggable classifier) and ErrP (ERP + shrinkage LDA)
+- **EEG models:** two-stage MI (rest vs MI, then left vs right; Riemannian tangent space or CSP + pluggable classifier) and ErrP (xDAWN + Riemannian tangent space + logistic regression)
 - **EMG:** multi-label classifier with Config · Monitor · Record · Live
 - **Evaluation:** trial-grouped stratified k-fold CV with a per-class report
 - **Signal quality:** raw-sample railed / flat / near-rail checks; data-delay readout
@@ -165,7 +215,9 @@
 - Set the dongle's FTDI latency timer to 1 ms and confirm the Monitor delay readout stays ≈ 20 ms
 - Fit-test the balanced montage + anchors; then update the MI/ErrP preset and docs
 - Fix the recurring railed channels (Fz, FC5, FC6, C3, P3, P4) — contact / wiring
-- Collect more data: ≥ 25–30 MI trials per class, ≥ 200 ErrP trials
+- Record our own MI sessions (≥ 40 trials per hand over several sessions, kinesthetic imagery) and check the C3 / C4 ERD lateralisation before tuning; ≥ 200 ErrP trials
+- Raise ErrP from 0.78 towards 85%: more cursor runs; then build the MI-driven ErrP task and the MI / ErrP reinforcement-learning loop
+- Methodology PDF still describes MI as CSP-based: update it for the two-stage model
 - Deferred: EMG-gated control loop; confidence threshold and smoothing for drone commands
 - Housekeeping: stale root `eeg_config.yaml` (old pipeline) left untracked
 - Before the stage 3 review: fix or defend the flagged slide claims; run the demo from `errp-live-timing` with a retrained ErrP model and a 1–45 Hz Monitor band-pass

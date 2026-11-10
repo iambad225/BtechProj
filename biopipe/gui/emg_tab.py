@@ -133,6 +133,10 @@ class EMGEngine:
             self._n = 0
             self._t = time.perf_counter()
 
+    def stop_record(self):
+        """End the recording now; the loop then posts what was captured."""
+        self._schedule = []; self._seg = None
+
     def _do_record(self, new):
         now = time.perf_counter()
         if self._seg is None:
@@ -416,7 +420,7 @@ class EMGTab(ttk.Frame):
         ttk.Label(t, text="Description (optional)").grid(row=4, column=0, sticky="e", padx=4)
         self.v_desc = tk.StringVar()
         ttk.Entry(t, textvariable=self.v_desc, width=40).grid(row=4, column=1, columnspan=3, sticky="w")
-        self.rec_btn = ttk.Button(t, text="● Record session", command=self._record)
+        self.rec_btn = ttk.Button(t, text="● Record session", command=self._record_toggle)
         self.rec_btn.grid(row=5, column=0, sticky="w", pady=8)
         self.rec_status = ttk.Label(t, text="", foreground="#0a7")
         self.rec_status.grid(row=6, column=0, columnspan=4, sticky="w")
@@ -428,13 +432,31 @@ class EMGTab(ttk.Frame):
         if hasattr(self, "rec_plan"):
             self.rec_plan.config(text="Plan: " + " -> ".join(["rest"] + self.cfg.labels))
 
+    def _ask_stop(self):
+        """True = save what was recorded so far, False = discard it, None = keep recording."""
+        return messagebox.askyesnocancel(
+            "Stop recording",
+            "Stop the recording now?\n\nYes \u2014 save what has been recorded so far\n"
+            "No \u2014 discard it\nCancel \u2014 carry on recording")
+
+    def _record_toggle(self):
+        if self.engine.mode != "record":
+            self._record(); return
+        keep = self._ask_stop()
+        if keep is None or self.engine.mode != "record":
+            return                                       # carry on (or it finished meanwhile)
+        self._rec_discard, self._rec_stopped = not keep, True
+        self.rec_status.config(text="Stopping\u2026")
+        self.engine.stop_record()
+
     def _record(self):
         self.cfg.subject = self.v_subject.get().strip() or "subject"
-        self.rec_btn.config(state="disabled")
+        self._rec_discard = self._rec_stopped = False
         try:
             self.engine.start()
         except Exception as e:
-            self.rec_btn.config(state="normal"); messagebox.showerror("Source error", str(e)); return
+            messagebox.showerror("Source error", str(e)); return
+        self.rec_btn.config(text="■ Stop recording")
         secs = float(self.v_secs.get()); reps = int(self.v_reps.get())
         schedule = []
         for _ in range(reps):
@@ -535,12 +557,16 @@ class EMGTab(ttk.Frame):
         self.after(60, self._tick)
 
     def _on_recorded(self, sig, labels):
-        self.rec_btn.config(state="normal")
+        self.rec_btn.config(text="● Record session")
+        if getattr(self, "_rec_discard", False):
+            self._rec_discard = False
+            self.rec_status.config(text="Stopped \u2014 recording discarded."); return
         if sig.shape[0] < self.cfg.window_samples:
             self.rec_status.config(text="Too little data captured — not saved."); return
         folder = recordings.save_recording(self.cfg, sig, labels,
                                            description=self.v_desc.get().strip(), training=True)
-        self.rec_status.config(text=f"Saved: {folder.name}  ({sig.shape[0]} samples)")
+        early = "  \u2014 stopped early" if getattr(self, "_rec_stopped", False) else ""
+        self.rec_status.config(text=f"Saved: {folder.name}  ({sig.shape[0]} samples){early}")
 
     def stop(self):
         try:

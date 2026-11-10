@@ -1,4 +1,5 @@
-"""EEG paradigm models: MI (CSP + pluggable classifier) and ErrP (xDAWN + Riemannian tangent space).
+"""EEG paradigm models: MI (two-stage: rest vs MI, then left vs right) and ErrP (xDAWN +
+Riemannian tangent space).
 
 Both are small, CPU-fast classical pipelines. They consume *epochs* (lists of
 (n_times, n_channels) arrays) that the training code has already band-passed for the
@@ -21,24 +22,29 @@ from sklearn.linear_model import LogisticRegression
 
 from core.csp import CSP
 
-# Classifier choices for the MI model (all expose predict_proba). LDA is the default
-# MI-literature workhorse; svm/logreg are linear; rf/tree are the tree-based options
-# (a single tree is offered for comparison but usually overfits CSP features).
-MI_CLASSIFIERS = ("lda", "svm", "logreg", "rf", "tree")
+# MI features: "riemann" = window covariance in the Riemannian tangent space (default; best on
+# the PhysioNet check, see _DOCS/mi_validation_physionet) or "csp" = CSP log-variances.
+MI_FEATURES = ("riemann", "csp")
+# Classifier choices for the MI model (all expose predict_proba). logreg is the default with
+# riemann features; lda is the CSP workhorse; rf/tree usually overfit these features.
+MI_CLASSIFIERS = ("logreg", "lda", "svm", "rf", "tree")
 
 
-def make_classifier(name: str):
-    name = (name or "lda").lower()
+def make_classifier(name: str, n_classes: int = 2):
+    """Classes are weighted equally: the rest-vs-MI stage sees twice as many MI windows (left +
+    right) as rest windows, and an unweighted model would lean towards MI."""
+    name = (name or "logreg").lower()
     if name == "lda":
-        return LDA()
+        return LDA(priors=np.full(n_classes, 1.0 / n_classes))
     if name == "svm":
-        return SVC(kernel="linear", probability=True)
+        return SVC(kernel="linear", probability=True, class_weight="balanced")
     if name == "logreg":
-        return LogisticRegression(max_iter=2000)
+        return LogisticRegression(max_iter=2000, class_weight="balanced")
     if name == "rf":
-        return RandomForestClassifier(n_estimators=200, random_state=0, n_jobs=-1)
+        return RandomForestClassifier(n_estimators=200, random_state=0, n_jobs=-1,
+                                      class_weight="balanced")
     if name == "tree":
-        return DecisionTreeClassifier(random_state=0)
+        return DecisionTreeClassifier(random_state=0, class_weight="balanced")
     raise ValueError(f"Unknown MI classifier: {name!r}")
 
 
@@ -93,44 +99,79 @@ def epoch_signal(sig: np.ndarray, fs: float, onsets, tmin: float, tmax: float,
     return out
 
 
-# ---------------- MI: CSP + LDA (2-class) ----------------
-class MIModel:
-    """CSP + a pluggable classifier.
+# ---------------- Riemannian helpers (MI and ErrP) ----------------
+def inv_sqrt(C: np.ndarray) -> np.ndarray:
+    d, V = eigh(C)
+    return (V / np.sqrt(np.maximum(d, 1e-12))) @ V.T
 
-    2 classes use one CSP; >2 classes use one-vs-rest CSP (a CSP per class vs the rest, log-var
-    features concatenated). This lets one model do ``{rest, mi_left, mi_right}`` so the ERD/ERS
-    gate is folded in as the ``rest`` class rather than a separate model.
+
+def shrunk_covs(X) -> np.ndarray:
+    """Ledoit-Wolf covariance of each (n_times, n_channels) window."""
+    return np.array([ledoit_wolf(e)[0] for e in X])
+
+
+def tangent_space(covs: np.ndarray, iref: np.ndarray) -> np.ndarray:
+    """Covariances -> tangent vectors at the reference R (``iref`` = R^-1/2): the upper triangle
+    of log(R^-1/2 C R^-1/2), off-diagonal terms scaled by sqrt(2)."""
+    n = covs.shape[1]
+    iu = np.triu_indices(n)
+    w = np.where(iu[0] == iu[1], 1.0, np.sqrt(2.0))
+    out = []
+    for C in covs:
+        d, V = eigh(iref @ C @ iref)
+        out.append(((V * np.log(np.maximum(d, 1e-12))) @ V.T)[iu] * w)
+    return np.asarray(out)
+
+
+# ---------------- MI ----------------
+class MIModel:
+    """One binary MI decoder: band-passed window -> spatial features -> classifier.
+
+    ``riemann`` features: the window's covariance (8x8) mapped to the tangent space at the
+    training mean (36 numbers; Barachant et al. 2012). It holds each channel's mu/beta power and
+    how the channels co-vary, so it sees the contralateral ERD without hand-made features.
+    ``csp`` features: log-variance of 4 CSP-filtered signals.
     """
     kind = "mi"
 
-    def __init__(self, classes, clf: str = "lda", n_csp: int = 4):
-        self.classes = list(classes)              # e.g. ["rest", "mi_left", "mi_right"]
-        self.clf_name = (clf or "lda").lower()
+    def __init__(self, classes, clf: str = "logreg", features: str = "riemann", n_csp: int = 4):
+        self.classes = list(classes)              # two classes, e.g. ["mi_left", "mi_right"]
+        self.clf_name = (clf or "logreg").lower()
+        self.features = (features or "riemann").lower()
+        if self.features not in MI_FEATURES:
+            raise ValueError(f"Unknown MI features: {features!r}")
         self.n_csp = n_csp
-        self.scaler = StandardScaler()
-        self.clf = make_classifier(self.clf_name)
-        self._binary = None
-        self._csp = None                          # single CSP (2-class)
-        self.csps = None                          # one CSP per class (one-vs-rest, >2 classes)
+        # CSP log-variances need standardising; tangent vectors are already centred and whitened
+        # by the reference (scaling them cost ~3 points on the PhysioNet check)
+        self.scaler = StandardScaler() if self.features == "csp" else None
+        self.clf = make_classifier(self.clf_name, len(self.classes))
 
     def fit(self, epochs, y):
         y = np.asarray(y)
-        self._binary = (len(self.classes) == 2)
-        if self._binary:
-            self._csp = CSP(self.n_csp).fit(epochs, y)
+        if self.features == "csp":
+            self.csp_ = CSP(self.n_csp).fit(epochs, y)
         else:
-            self.csps = [CSP(self.n_csp).fit(epochs, (y == c).astype(int))
-                         for c in range(len(self.classes))]
-        self.clf.fit(self.scaler.fit_transform(self._transform(epochs)), y)
+            self.iref_ = inv_sqrt(shrunk_covs(epochs).mean(axis=0))
+        F = self._transform(epochs)
+        self.clf.fit(self.scaler.fit_transform(F) if self.scaler else F, y)
         return self
 
     def _transform(self, epochs):
-        if self._binary:
-            return self._csp.transform(epochs)
-        return np.concatenate([csp.transform(epochs) for csp in self.csps], axis=1)
+        if self.features == "csp":
+            return self.csp_.transform(epochs)
+        return tangent_space(shrunk_covs(epochs), self.iref_)
 
     def predict_proba(self, epochs):
-        return self.clf.predict_proba(self.scaler.transform(self._transform(epochs)))
+        F = self._transform(epochs)
+        return self.clf.predict_proba(self.scaler.transform(F) if self.scaler else F)
+
+    @staticmethod
+    def decide(proba):
+        """Class index per row of predict_proba."""
+        return np.argmax(np.atleast_2d(proba), axis=1)
+
+    def predict(self, epochs):
+        return self.decide(self.predict_proba(epochs))
 
     def save(self, path):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -139,6 +180,43 @@ class MIModel:
     @staticmethod
     def load(path):
         return joblib.load(path)
+
+
+class TwoStageMI(MIModel):
+    """Stage 1 (gate): rest vs MI with either hand. Stage 2 (side): left vs right, trained on MI
+    windows only. Decision: rest unless the gate says MI, then the side.
+
+    Each stage is a binary MIModel and is scored on its own. The EMG wrist clench is meant to
+    replace the gate later; the side stage then runs alone.
+    """
+
+    def __init__(self, classes, clf: str = "logreg", features: str = "riemann"):
+        self.classes = list(classes)              # ["rest", "mi_left", "mi_right"]
+        self.clf_name, self.features = clf, features
+        self.gate = MIModel(["rest", "mi"], clf, features)
+        self.side = MIModel(self.classes[1:], clf, features)
+
+    def fit(self, epochs, y):
+        y = np.asarray(y)
+        self.gate.fit(epochs, (y > 0).astype(int))
+        mi = np.flatnonzero(y > 0)
+        self.side.fit([epochs[i] for i in mi], y[mi] - 1)
+        return self
+
+    def stages(self, epochs):
+        """(P(MI), P(right | MI)) per window."""
+        return self.gate.predict_proba(epochs)[:, 1], self.side.predict_proba(epochs)[:, 1]
+
+    def predict_proba(self, epochs):
+        """[P(rest), P(MI) P(left | MI), P(MI) P(right | MI)] per window."""
+        g, r = self.stages(epochs)
+        return np.column_stack([1.0 - g, g * (1.0 - r), g * r])
+
+    @staticmethod
+    def decide(proba):
+        """Rest when P(rest) > 0.5 (the gate is closed), otherwise the likelier side."""
+        p = np.atleast_2d(proba)
+        return np.where(p[:, 0] > 0.5, 0, 1 + np.argmax(p[:, 1:], axis=1))
 
 
 class ErrPModel:
@@ -153,9 +231,11 @@ class ErrPModel:
     """
     kind = "errp"
     method = "xdawn+riemann"
+    tmax = 0.8                                     # epoch end of models saved before it was stored
 
-    def __init__(self, n_filters: int = 2):
+    def __init__(self, n_filters: int = 2, tmax: float = 0.8):
         self.n_filters = n_filters                 # xDAWN filters per class
+        self.tmax = tmax                           # epoch end (s) it was trained on; live cuts the same
         self.clf = LogisticRegression(C=1.0, class_weight="balanced", max_iter=2000)
 
     def _xdawn(self, X, y):
@@ -172,22 +252,14 @@ class ErrPModel:
         return np.array([ledoit_wolf(np.vstack([self.P_, (e @ self.W_).T]).T)[0] for e in X])
 
     def _tangent(self, covs):
-        n = covs.shape[1]
-        iu = np.triu_indices(n)
-        w = np.where(iu[0] == iu[1], 1.0, np.sqrt(2.0))
-        out = []
-        for C in covs:
-            d, V = eigh(self.iref_ @ C @ self.iref_)
-            out.append(((V * np.log(np.maximum(d, 1e-12))) @ V.T)[iu] * w)
-        return np.asarray(out)
+        return tangent_space(covs, self.iref_)
 
     def fit(self, epochs, y):                      # y: 0 correct, 1 error
         X, y = np.asarray(epochs, dtype=float), np.asarray(y)
         self.W_ = self._xdawn(X, y)
         self.P_ = np.vstack([(X[y == c].mean(axis=0) @ self.W_).T for c in (0, 1)])
         covs = self._covs(X)
-        d, V = eigh(covs.mean(axis=0))
-        self.iref_ = (V / np.sqrt(np.maximum(d, 1e-12))) @ V.T
+        self.iref_ = inv_sqrt(covs.mean(axis=0))
         self.clf.fit(self._tangent(covs), y)
         return self
 

@@ -10,8 +10,8 @@ more sessions, and run **live** inference — all from one window.
   → live decoding.
 - **EEG** — a visual **10-20 / 10-10 electrode selector**, a live **band-power monitor**
   (δ/θ/α/β/γ + a toggleable **waterfall** spectrogram) with an **eyes-closed alpha test**, and
-  two trainable decoders: **motor imagery** as a 3-class **rest / left / right** model (CSP + a
-  pluggable classifier — the `rest` class folds the ERD/ERS gate in) and **ErrP** error detection.
+  two trainable decoders: **motor imagery** as a **two-stage** model (rest vs MI, then left vs
+  right; Riemannian tangent space or CSP + a pluggable classifier) and **ErrP** error detection.
 
 Both modalities record to the same schema and are evaluated with **trial-grouped** splits (see
 [On-disk schema](#on-disk-schema)), so accuracy isn't inflated by leaking correlated windows.
@@ -61,7 +61,8 @@ Each Config tab has a **Profile** bar (save/load named configurations under
 - **Monitor** — live waveform with µV / seconds axes (right) + per-channel RMS bars (left).
 - **Record** — **subject** + guided capture: cycles `rest` + each action for the chosen
   seconds × reps into **one session** (each block is one **trial**), with an optional
-  **description**, saved under `data/training/`.
+  **description**, saved under `data/training/`. **■ Stop recording** ends it early: save what
+  was recorded so far, discard it, or carry on.
 - **Live** — pick a trained model, Start, and see a probability bar per action (green when
   active, several at once) with the compute latency.
 
@@ -81,7 +82,8 @@ Each Config tab has a **Profile** bar (save/load named configurations under
   warns if a run captured dead channels, and training refuses them with a clear message.
 - **Record** — **subject** + a large subject-facing **cue** display with a corner countdown.
   Two paradigms: **MI** (rest / left / right cues, block-randomised: each class once per rep,
-  equal counts, never the same cue twice in a row; cue length = **Seconds/class**) and two **ErrP**
+  equal counts, never the same cue twice in a row; cue length = **Seconds/class**, **Reps**
+  default 10 ≈ 3 min, up to 40) and two **ErrP**
   tasks that mark each outcome as error or correct:
   - **ErrP (cursor task)** — recommended. A target box lights up left or right; the subject
     presses **←/→** toward it and the cursor moves — the opposite way at **Error rate**. Their own
@@ -94,9 +96,11 @@ Each Config tab has a **Profile** bar (save/load named configurations under
     error itself can drive the response. **Outcome s** (default 1.0, ≥ 0.8 so the outcome never
     disappears inside an epoch) sets how long it stays up.
 
-  Saved under `data/training/`.
-- **Live** — run a trained MI model on the stream; a probability bar per class
-  (rest / left / right) with the top class highlighted (a `rest` prediction = gate closed).
+  Saved under `data/training/`. **■ Stop recording** ends a session early (MI or ErrP): save what
+  was recorded so far, discard it, or carry on; an ErrP task stops at once.
+- **Live** — run a trained MI model on the stream. A two-stage model shows both stages —
+  *stage 1: rest / MI* and *stage 2: left / right* (P(side | MI)) — and decides **rest** unless
+  stage 1 says MI, then the likelier side; the top line reads e.g. `→ mi_left  MI 72% · side 64%`.
 - **ErrP Live** — test a trained ErrP model on live EEG. ErrP is event-locked, so this runs the
   same cursor or arrow task as Record; at each outcome the −0.2…+0.8 s epoch is cut from the
   continuously filtered stream (same causal 1–10 Hz filter and baseline as training) and
@@ -126,12 +130,26 @@ arrives in bursts. Training and the live tabs use the **same causal filters**, s
 match training exactly.
 
 ### Train tab
-Pick the **modality**; for EEG choose the **paradigm** (`MI (rest/L/R)` or `ErrP`) and, for MI,
-the **classifier** (`lda` / `svm` / `logreg` / `rf` / `tree`) and Win/Step (ErrP has a fixed
-pipeline and epoch, so neither is shown for it). Train ErrP on one task's recordings — cursor and
+Pick the **modality**; for EEG choose the **paradigm** (`MI (2-stage)` or `ErrP`) and, for MI,
+the **features** (`riemann` default, or `csp`), the **classifier** (`logreg` default, `lda` /
+`svm` / `rf` / `tree`) and Win/Step (default 2000 / 500 ms). ErrP has a fixed pipeline and
+epoch, so none of these is shown for it. Train ErrP on one task's recordings — cursor and
 arrow responses differ. Select one or more recordings
 (Ctrl/Shift-click to pool; **↻ Refresh** to pick up new ones), review each one's metadata +
-description, then **Train** and **Save** with a description.
+description, then **Train** and **Save model**.
+
+**Naming a model** (EEG and EMG alike): the name is `<subject>_<name>_<scores>`, previewed as
+*Saves as:* under the fields.
+- **Subject\*** is required and typed in by hand; **Save model** refuses an empty subject.
+  It is also written into the model's JSON.
+- **Name** is your own text.
+- **+ scores** adds the headline cross-validated score(s):
+  - `gate0.74_side0.69` for two-stage MI;
+  - `bal0.78` (balanced accuracy) for other EEG models;
+  - `acc0.91` (subset accuracy) for EMG.
+- Allowed characters are letters, digits, `.`, `_` and `-`; anything else becomes `-`.
+- Saving over an existing name asks before replacing it. An optional **Description** is stored
+  in the model's JSON.
 
 Evaluation never splits windows randomly (that would leak temporally-correlated windows across
 the split and inflate the score):
@@ -147,8 +165,20 @@ the split and inflate the score):
 Pooling is allowed **only when every selected recording shares the same electrode→channel map,
 sample rate, and label set**; incompatible picks are blocked.
 
-Two EEG models total: the 3-class **MI** decoder (its `rest` class is the ERD/ERS gate, so
-there's no separate gate model) and **ErrP**.
+Two EEG models total: **MI** and **ErrP**.
+
+**Why the MI model has two stages.** Rest / left / right is split into two binary decisions,
+each trained and scored on its own: **stage 1** rest vs MI (either hand) on all windows, and
+**stage 2** left vs right on MI windows only; live, the output is rest unless stage 1 says MI,
+then stage 2 picks the side. The Train report gives each stage's balanced accuracy and
+per-class table, then the combined rest / left / right score. Each stage maps the 2 s window's
+8×8 covariance to the Riemannian tangent space at the training mean and feeds a class-balanced
+logistic regression (Barachant et al. 2012); CSP + LDA stays selectable. Checked on public data
+(PhysioNet motor imagery, 5 subjects, our 8 electrodes; see
+`_DOCS/mi_validation_physionet/`): stage 1 0.74, stage 2 0.69, rest / left / right 0.58 vs 0.55
+for the old single 3-class CSP model; best subjects 0.91 (stage 1) and 0.83 (stage 2); left vs
+right tracks how lateralised a person's ERD is. The planned EMG wrist clench will replace stage 1;
+stage 2 then runs alone (`TwoStageMI.side`).
 
 **Why the ErrP model uses spatial filtering.** On this headset ~95% of the 1–10 Hz power is common
 to all eight channels (the ear reference's own activity), and the error response is a small
@@ -161,7 +191,8 @@ evoked response; each epoch is stacked under the two filtered class averages, it
 logistic regression outputs P(error). On the 28 Oct cursor sessions (180 trials): 0.78 balanced
 accuracy (5-fold grouped CV; label-shuffle p = 0.01), 0.73–0.81 on a held-out session, unchanged
 without the eye-movement-sensitive FC5/FC6 and without blink-sized epochs; the error − correct
-difference peaks at Cz (negative ~350 ms, positive ~420 ms).
+difference is a dip at ~0.37 s over the central electrodes. Each model stores its own epoch end
+(`ErrPModel.tmax`) and ErrP Live cuts that window.
 
 ---
 
@@ -196,7 +227,9 @@ Both EMG and EEG use this schema (EEG `electrode` holds 10-20 names, `paradigm` 
 Recordings that predate the `trial` column still load — their trials are derived from label runs.
 Live/inference captures go under `data/acquired/` instead of `data/training/`.
 
-### Models — `models/<modality>_<subject>_<model>_acc<score>_<YYYYMMDD_HHMMSS>/`
+### Models — `models/<name>/`
+Named in the Train tab: `<subject>_<name>_<scores>` (see *Naming a model*). The tabs find EEG /
+EMG models by the `modality` in each JSON, not by the folder name.
 - `<name>.joblib` — the trained classifier.
 - `<name>.json` — modality, subject, `model_type`, `paradigm` (EEG), `source_files`, electrode
   `channels`, `sample_rate`, `labels`, `features`, `window_ms`/`step_ms`, `metrics`, and an
@@ -263,7 +296,8 @@ biopipe/
   register it in `sources/__init__.py:create_source`, set `source.type` in the config.
 - **New EMG feature/model**: `core/features_emg.py`, `core/model.py` (models are pluggable:
   `lda` / `logreg` / `rf` / `svm` / `tree`).
-- **EEG paradigms**: MI (CSP + pluggable classifier, one-vs-rest CSP for the 3-class case) and
+- **EEG paradigms**: MI (`TwoStageMI` = two binary `MIModel`s, Riemannian tangent space or CSP
+  + a pluggable classifier) and
   ErrP (xDAWN + Riemannian tangent space + logistic regression) live in `core/eeg_models.py` +
   `core/eeg_training.py`
   (`core/csp.py` for CSP); add a paradigm by extending `train_paradigm` and the Train tab's list.

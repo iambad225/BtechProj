@@ -4,6 +4,9 @@ _DOCS/*
 !_DOCS/ERD-ERS_MI_ErrP_Training_Methodology.pdf
 !_DOCS/source/
 !_DOCS/PROJECT_LOG.md
+# MI validation on public data: script, doc and results tracked; the downloaded EDFs are not
+!_DOCS/mi_validation_physionet/
+_DOCS/mi_validation_physionet/data/
 
 # OpenBCI GUI application install (~510 MB of third-party binaries)
 /OpenBCI_GUI/

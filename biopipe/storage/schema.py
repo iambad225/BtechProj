@@ -34,6 +34,13 @@ def slug(text: str) -> str:
     return s or "unnamed"
 
 
+def name_token(text: str) -> str:
+    """A user-typed name kept readable: letters, digits, '.', '_' and '-' stay (case too);
+    anything else becomes '-'. Empty if nothing usable is left."""
+    s = re.sub(r"[^0-9A-Za-z._-]+", "-", str(text).strip())
+    return re.sub(r"-{2,}", "-", s).strip("-_.")
+
+
 @dataclass
 class ChannelInfo:
     channel: int
@@ -100,13 +107,6 @@ class ModelMeta:
     paradigm: str = ""              # eeg: "mi" | "erd" | "errp"
     description: str = ""
     schema_version: int = SCHEMA_VERSION
-
-    def accuracy(self) -> float:
-        return float(self.metrics.get("accuracy", 0.0))
-
-    def folder_name(self) -> str:
-        return (f"{self.modality}_{slug(self.subject)}_{self.model_type}"
-                f"_acc{self.accuracy():.2f}_{stamp_from_iso(self.created)}")
 
     def to_json(self, path: str | Path) -> None:
         Path(path).write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")

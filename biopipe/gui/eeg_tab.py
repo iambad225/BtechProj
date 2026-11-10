@@ -37,7 +37,7 @@ CONFIG_PATH = "config/eeg.yaml"
 BAND_COLORS = {"delta": "#6c5ce7", "theta": "#0984e3", "alpha": "#e17055",
                "beta": "#00b894", "gamma": "#d63031"}
 # EEG paradigms that run continuously on a sliding window (band, short tag).
-# MI is now rest/left/right, so its own 'rest' class is the gate (no separate ERD model).
+# MI: rest vs MI (gate), then left vs right - both stages in one model.
 LIVE_PARADIGMS = {"mi": ((8.0, 30.0), "MI")}
 # ErrP Live tests: the event-locked arrow task, or statements read for as long as they're shown
 EL_TESTS = ("Cursor (press ←/→)", "Arrow (watch)", "True / false facts")
@@ -208,6 +208,10 @@ class EEGEngine:
         self._rec_sig = []; self._rec_lab = []; self._filt.reset()
         self.mode = "record"
 
+    def stop_record(self):
+        """End a cue-schedule recording now; the loop then posts what was captured."""
+        self._schedule = []; self._seg = None
+
     def start_errp(self):
         with self._lock:
             self._errp_sig = []; self._errp_markers = []; self._errp_total = 0
@@ -253,11 +257,13 @@ class EEGEngine:
             wf = buf[-s["win"]:][:, s["cols"]]
             try:
                 proba = np.asarray(s["model"].predict_proba([wf])[0], dtype=float)
+                decide = getattr(s["model"], "decide", None)     # two-stage: gate, then side
+                top = int(decide(proba)[0]) if decide else int(np.argmax(proba))
             except Exception:
                 continue
             with self._lock:
                 s["proba"] = proba
-                s["top"] = int(np.argmax(proba))
+                s["top"] = top
         self.live_ms = (time.perf_counter() - t0) * 1000.0
 
     def mark_event(self, label, t=None):
@@ -283,6 +289,7 @@ class EEGEngine:
             self._el_pending = []; self._el_scans = []; self.quality = []
         self._el_filt = StreamBandpass(self.cfg.sample_rate, *ERRP_BAND, self.cfg.n_channels)
         self._el_spec = spec; self._el_qt = 0.0
+        self._el_tmax = float(spec["model"].tmax)       # the epoch end this model was trained on
         self.mode = "errp_live"
 
     def mark_live_event(self, label, t=None):
@@ -293,7 +300,7 @@ class EEGEngine:
     def begin_scan(self, label, t=None):
         """A statement appeared at PC time ``t``. Its onset is not one known instant (the error is
         noticed while reading), so every point from here to end_scan() is treated as a possible
-        event: the -0.2..+0.8 s epoch around it is classified, every SCAN_STEP_S. Each score is
+        event: the model's epoch (-0.2 s to its end) around it is classified, every SCAN_STEP_S. Each score is
         posted as ("errp_scan_p", p); when the statement is done, ("errp_scan", label, peak, mean,
         n_epochs, dead_channels)."""
         g = self.index_at(time.perf_counter() if t is None else t)
@@ -309,7 +316,7 @@ class EEGEngine:
 
     def _do_errp_live(self, new, g_end):
         fs = self.cfg.sample_rate
-        pre, post = int(round(-ERRP_TMIN * fs)), int(round(ERRP_TMAX * fs))
+        pre, post = int(round(-ERRP_TMIN * fs)), int(round(self._el_tmax * fs))
         keep = int(self.EL_KEEP_S * fs)
         y = self._el_filt.process(new) if new.shape[0] else None   # causal 1-10 Hz, as training
         with self._lock:
@@ -333,8 +340,9 @@ class EEGEngine:
         for g, label in ready:
             if g - pre < start:                                         # epoch already scrolled out
                 self.events.put(("errp_result", label, None, [])); continue
-            # baseline-corrected -0.2..+0.8 s epoch from the filtered stream: same as training
-            eps = epoch_signal(fbuf, fs, [g - start], ERRP_TMIN, ERRP_TMAX, baseline=(ERRP_TMIN, 0.0))
+            # baseline-corrected epoch (the model's own end) from the filtered stream: same as training
+            eps = epoch_signal(fbuf, fs, [g - start], ERRP_TMIN, self._el_tmax,
+                               baseline=(ERRP_TMIN, 0.0))
             if not eps:
                 self.events.put(("errp_result", label, None, [])); continue
             try:
@@ -359,7 +367,7 @@ class EEGEngine:
                     gs.append(s["next"])
                 s["next"] += step
             if gs:
-                eps = epoch_signal(fbuf, fs, [g - start for g in gs], ERRP_TMIN, ERRP_TMAX,
+                eps = epoch_signal(fbuf, fs, [g - start for g in gs], ERRP_TMIN, self._el_tmax,
                                    baseline=(ERRP_TMIN, 0.0))
                 try:
                     ps = [float(p) for p in self._el_spec["model"].proba_error(
@@ -766,7 +774,8 @@ class EEGTab(ttk.Frame):
         self.v_secs = ttk.Spinbox(self.mi_frame, from_=2, to=30, width=5); self.v_secs.set(4)
         self.v_secs.grid(row=0, column=1, sticky="w")
         ttk.Label(self.mi_frame, text="Reps").grid(row=1, column=0, sticky="e", padx=4)
-        self.v_reps = ttk.Spinbox(self.mi_frame, from_=1, to=15, width=5); self.v_reps.set(6)
+        # one rep = rest + left + right (~18 s); the PhysioNet check had ~22 trials per class
+        self.v_reps = ttk.Spinbox(self.mi_frame, from_=1, to=40, width=5); self.v_reps.set(10)
         self.v_reps.grid(row=1, column=1, sticky="w")
 
         self.errp_frame = ttk.Frame(left)
@@ -789,7 +798,7 @@ class EEGTab(ttk.Frame):
         ttk.Label(left, text="Description").grid(row=5, column=0, sticky="e", padx=4, pady=2)
         self.v_desc = tk.StringVar()
         ttk.Entry(left, textvariable=self.v_desc, width=18).grid(row=5, column=1, sticky="w")
-        self.rec_btn = ttk.Button(left, text="● Record session", command=self._record)
+        self.rec_btn = ttk.Button(left, text="● Record session", command=self._record_toggle)
         self.rec_btn.grid(row=6, column=0, columnspan=2, sticky="w", pady=8)
         self.rec_status = ttk.Label(left, text="", foreground="#0a7", wraplength=220)
         self.rec_status.grid(row=7, column=0, columnspan=2, sticky="w")
@@ -864,14 +873,35 @@ class EEGTab(ttk.Frame):
         else:
             self._cue_text(label.upper(), color=go if ready else "#2ecc40", sub=prep if ready else "")
 
+    def _ask_stop(self):
+        """True = save what was recorded so far, False = discard it, None = keep recording."""
+        return messagebox.askyesnocancel(
+            "Stop recording",
+            "Stop the recording now?\n\nYes \u2014 save what has been recorded so far\n"
+            "No \u2014 discard it\nCancel \u2014 carry on recording")
+
+    def _record_toggle(self):
+        if self.engine.mode not in ("record", "errp"):
+            self._record(); return
+        keep = self._ask_stop()
+        if keep is None or self.engine.mode not in ("record", "errp"):
+            return                                       # carry on (or it finished meanwhile)
+        self._rec_discard, self._rec_stopped = not keep, True
+        self.rec_status.config(text="Stopping\u2026", foreground="#555")
+        if self.engine.mode == "errp":
+            self._errp_abort(); self.engine.finish_errp()
+        else:
+            self.engine.stop_record()
+
     def _record(self):
         self.cfg.subject = self.v_subject.get().strip() or "subject"
         self.rec_status.config(foreground="#0a7")
-        self.rec_btn.config(state="disabled")
+        self._rec_discard = self._rec_stopped = False
         try:
             self.engine.start()
         except Exception as e:
-            self.rec_btn.config(state="normal"); messagebox.showerror("Source error", str(e)); return
+            messagebox.showerror("Source error", str(e)); return
+        self.rec_btn.config(text="■ Stop recording")
         task = REC_ERRP.get(self.v_paradigm.get())
         if task:
             self._record_errp(task)
@@ -907,14 +937,14 @@ class EEGTab(ttk.Frame):
     @staticmethod
     def _errp_times(wait_w, outcome_w):
         """Response window / outcome display time from two spinboxes. The outcome stays up at least
-        until the classic epoch end (ERRP_TMAX), so its disappearance never falls inside it."""
+        0.8 s — past the end of the model's epoch — so its disappearance never falls inside it."""
         def val(w, default, lo, hi):
             try:
                 return min(hi, max(lo, float(w.get())))
             except ValueError:
                 return default
         return {"wait_s": val(wait_w, 3.0, 1.0, 10.0),
-                "outcome_s": val(outcome_w, 1.0, ERRP_TMAX, 5.0)}
+                "outcome_s": val(outcome_w, 1.0, max(ERRP_TMAX, 0.8), 5.0)}
 
     def _errp_task_start(self, n, rate, cv, on_event, on_done, on_progress, lead_ms=500,
                          task="cursor", wait_s=3.0, outcome_s=1.0):
@@ -1041,8 +1071,9 @@ class EEGTab(ttk.Frame):
     def _build_live(self):
         t = self.t_live
         t.columnconfigure(0, weight=1); t.rowconfigure(3, weight=1)
-        ttk.Label(t, text="Run one or more trained EEG models on the live stream. "
-                          "Ctrl/Shift-click to select several (e.g. ERD gate + MI). "
+        ttk.Label(t, text="Run one or more trained EEG models on the live stream "
+                          "(Ctrl/Shift-click to select several). A two-stage MI model shows both "
+                          "stages: rest vs MI, then left vs right. "
                           "The current config's electrodes must include the model's.",
                   foreground="#555").grid(row=0, column=0, sticky="w", pady=(0, 6))
         bar = ttk.Frame(t); bar.grid(row=1, column=0, sticky="ew", pady=(0, 6))
@@ -1150,8 +1181,12 @@ class EEGTab(ttk.Frame):
             fr.grid(row=r, column=0, sticky="nsew", pady=3)
             fr.columnconfigure(0, weight=1); fr.rowconfigure(1, weight=1)
             active = ttk.Label(fr, text="→ -", font=("", 14, "bold")); active.grid(row=0, column=0, sticky="w")
-            bars = LevelBars(fr, s["labels"]); bars.grid(row=1, column=0, sticky="nsew")
-            self.live_panels.append({"spec": s, "frame": fr, "bars": bars, "active": active})
+            two = hasattr(s["model"], "gate")                     # TwoStageMI
+            rows = (["stage 1: rest", "stage 1: MI", "stage 2: left", "stage 2: right"]
+                    if two else s["labels"])
+            bars = LevelBars(fr, rows); bars.grid(row=1, column=0, sticky="nsew")
+            self.live_panels.append({"spec": s, "frame": fr, "bars": bars, "active": active,
+                                     "two": two})
 
     def _update_live(self):
         parts = []
@@ -1161,12 +1196,24 @@ class EEGTab(ttk.Frame):
             lat = self.engine.live_ms
         for p, proba, top in snaps:
             labels = p["spec"]["labels"]
-            if proba is None or len(proba) != len(p["bars"].rows):
+            if proba is None:
                 continue
-            for i in range(len(labels)):
-                p["bars"].set(i, proba[i], f"{proba[i]*100:0.0f}%", on=(i == top))
+            if p["two"]:                  # proba = [P(rest), P(MI)P(left|MI), P(MI)P(right|MI)]
+                g = 1.0 - proba[0]
+                r = proba[2] / g if g > 1e-9 else 0.5
+                vals, on = [1.0 - g, g, 1.0 - r, r], [top == 0, top > 0, top == 1, top == 2]
+                for i, v in enumerate(vals):
+                    p["bars"].set(i, v, f"{v*100:0.0f}%", on=on[i])
+                txt = (f"rest   {(1.0 - g)*100:0.0f}%" if top == 0 else
+                       f"{labels[top]}   MI {g*100:0.0f}% · side {max(r, 1.0 - r)*100:0.0f}%")
+            else:
+                if len(proba) != len(p["bars"].rows):
+                    continue
+                for i in range(len(labels)):
+                    p["bars"].set(i, proba[i], f"{proba[i]*100:0.0f}%", on=(i == top))
+                txt = f"{labels[top]}   {proba[top]*100:0.0f}%" if 0 <= top < len(labels) else ""
             if 0 <= top < len(labels):
-                p["active"].config(text=f"→ {labels[top]}   {proba[top]*100:0.0f}%")
+                p["active"].config(text=f"→ {txt}")
                 parts.append(f"{p['spec']['tag']}={labels[top]}")
         self.live_decision.config(text="DECISION:  " + ("      ".join(parts) if parts else "-"))
         dtxt, dwarn = self._delay_info(self.engine.latency_stats())
@@ -1377,7 +1424,7 @@ class EEGTab(ttk.Frame):
                 int(self.el_trials.get()), float(self.el_rate.get()), secs, self.el_canvas,
                 on_start=self._el_fact_start,
                 on_end=lambda ts: self.engine.end_scan(ts),
-                # the last statement's final epochs need ~0.8 s more EEG before they're scored
+                # the last statement's final epochs need up to 0.8 s more EEG before they're scored
                 on_done=lambda: self.after(1500, lambda: self._el_finish(rid)),
                 on_progress=lambda k, n: self.el_status.config(text=f"fact {k}/{n}",
                                                                foreground="#555"),
@@ -1386,7 +1433,7 @@ class EEGTab(ttk.Frame):
         self._errp_task_start(
             int(self.el_trials.get()), float(self.el_rate.get()), self.el_canvas,
             on_event=lambda lab, ts: self.engine.mark_live_event(lab, ts),
-            # the last outcome needs ~0.8 s more EEG before it can be classified
+            # the last outcome needs up to 0.8 s more EEG before it can be classified
             on_done=lambda: self.after(1500, lambda: self._el_finish(rid)),
             on_progress=lambda k, n, note="": self.el_status.config(
                 text=f"trial {k}/{n}" + (f"  ({note})" if note else ""), foreground="#555"),
@@ -1678,7 +1725,10 @@ class EEGTab(ttk.Frame):
         self.after(60, self._tick)
 
     def _on_recorded(self, sig, labels):
-        self.rec_btn.config(state="normal")
+        self.rec_btn.config(text="● Record session")
+        if getattr(self, "_rec_discard", False):
+            self._rec_discard = False
+            self.rec_status.config(text="Stopped \u2014 recording discarded.", foreground="#555"); return
         if sig.shape[0] < self.cfg.window_samples:
             self.rec_status.config(text="Too little data captured - not saved."); return
         folder = recordings.save_recording(self.cfg, sig, labels,
@@ -1689,7 +1739,8 @@ class EEGTab(ttk.Frame):
                 text=f"Saved {folder.name}, but {', '.join(dead)} had no signal (railed/flat), so "
                      "this run can't train. Fix contact/wiring and re-record.", foreground="#c0392b")
         else:
-            self.rec_status.config(text=f"Saved: {folder.name}  ({sig.shape[0]} samples)",
+            early = "  \u2014 stopped early" if getattr(self, "_rec_stopped", False) else ""
+            self.rec_status.config(text=f"Saved: {folder.name}  ({sig.shape[0]} samples){early}",
                                    foreground="#0a7")
 
     def stop(self):

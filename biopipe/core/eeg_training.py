@@ -1,8 +1,9 @@
 """Train the EEG paradigms from recorded sessions.
 
-  mi   : rest / left / right        -> CSP (one-vs-rest for 3-class) + a pluggable classifier;
-                                       the ``rest`` class folds the ERD/ERS gate into this model
-  errp : error vs correct feedback  -> event-locked ERP + shrinkage LDA
+  mi   : rest / left / right        -> two stages, each scored on its own: rest vs MI (the
+                                       gate), then left vs right on MI windows; each stage is
+                                       Riemannian tangent space (or CSP) + a pluggable classifier
+  errp : error vs correct feedback  -> xDAWN + Riemannian tangent space + logistic regression
 
 Windows/epochs are grouped by trial (recording segment / feedback event) and validated with
 **trial-grouped k-fold cross-validation** (whole trials held out per fold, stratified by class
@@ -20,11 +21,13 @@ import numpy as np
 from sklearn.metrics import (balanced_accuracy_score, accuracy_score,
                              precision_recall_fscore_support)
 
-from core.eeg_models import MIModel, ErrPModel, causal_bandpass, epoch_signal
+from core.eeg_models import MIModel, TwoStageMI, ErrPModel, causal_bandpass, epoch_signal
 from core.quality import check_sessions
 
 MI_BAND = (8.0, 30.0)
 ERRP_BAND = (1.0, 10.0)
+# epoch around each outcome; each trained model stores its own end (ErrPModel.tmax), and ErrP
+# Live cuts that window. (+0.5 s scored the same on the 29 Oct test; +0.8 s kept as default.)
 ERRP_TMIN, ERRP_TMAX = -0.2, 0.8
 
 
@@ -45,11 +48,11 @@ def _windows(seg: np.ndarray, win: int, step: int):
 
 # ---------- collection ----------
 def collect_mi(sessions, cfg):
-    """Windows for the MI model, with rest folded in as a class (the gate).
+    """Windows for the MI model.
 
     Returns (epochs, y, groups, classes) where ``classes`` is rest-first, e.g.
-    ``["rest", "mi_left", "mi_right"]`` (2-class if rest is absent from the data). Rest windows
-    make the model's ``rest`` class act as the ERD/ERS soft gate, so no separate gate model.
+    ``["rest", "mi_left", "mi_right"]`` (2 classes if rest is absent from the data). Rest windows
+    train the two-stage model's gate (rest vs MI).
     """
     mi = [l for l in cfg.labels if l.lower() != "rest"][:2]
     wanted = ["rest"] + mi
@@ -137,7 +140,8 @@ def _grouped_cv(make_model, epochs, y, groups, n_classes, max_folds=5):
         if len(np.unique(y[tr])) < n_classes:      # need all classes present to train a fold
             continue
         m = make_model().fit([epochs[i] for i in tr], y[tr])
-        pred = m.predict_proba([epochs[i] for i in te]).argmax(1)
+        Xte = [epochs[i] for i in te]
+        pred = m.predict(Xte) if hasattr(m, "predict") else m.predict_proba(Xte).argmax(1)
         yt.append(y[te]); yp.append(pred)
         fold_acc.append(balanced_accuracy_score(y[te], pred))
     if not fold_acc:
@@ -163,19 +167,39 @@ def _cv_metrics(cv, classes) -> dict:
 
 # ---------- trainers ----------
 def train_mi(sessions, cfg) -> Tuple[MIModel, dict]:
+    """rest + left + right -> TwoStageMI (gate, then side); two classes -> one binary MIModel.
+
+    Each stage gets its own grouped CV (the gate on all windows, the side on MI windows only),
+    and the whole cascade is scored on rest / left / right as well.
+    """
     epochs, y, groups, classes = collect_mi(sessions, cfg)
-    clf = getattr(cfg, "model_type", "lda") or "lda"
+    clf = getattr(cfg, "model_type", "logreg") or "logreg"
+    feats = getattr(cfg, "mi_features", "riemann") or "riemann"
     if len(classes) < 2:
         raise ValueError("Need at least two classes (e.g. rest + MI, or mi_left + mi_right) "
                          "in the recordings.")
     if len(epochs) < 12 or len(np.unique(y)) < len(classes):
         raise ValueError(f"Not enough MI data ({len(epochs)} windows over classes {classes}). "
                          "Record rest + both MI classes with more reps.")
-    cv = _grouped_cv(lambda: MIModel(classes, clf=clf), epochs, y, groups, len(classes))
-    metrics = {"paradigm": "mi", "classes": classes, "classifier": clf, "filter": "causal",
-               "n_windows": len(epochs), "n_trials": int(len(np.unique(groups)))}
-    metrics.update(_cv_metrics(cv, classes))
-    model = MIModel(classes, clf=clf).fit(epochs, y)      # final model on all data
+    metrics = {"paradigm": "mi", "classes": classes, "classifier": clf, "features": feats,
+               "filter": "causal", "n_windows": len(epochs),
+               "n_trials": int(len(np.unique(groups)))}
+    if len(classes) == 3:
+        make = lambda: TwoStageMI(classes, clf, feats)
+        y1, mi = (y > 0).astype(int), np.flatnonzero(y > 0)
+        gate_cv = _grouped_cv(lambda: MIModel(["rest", "mi"], clf, feats), epochs, y1, groups, 2)
+        side_cv = _grouped_cv(lambda: MIModel(classes[1:], clf, feats),
+                              [epochs[i] for i in mi], y[mi] - 1, groups[mi], 2)
+        metrics["method"] = "two-stage"
+        metrics["stages"] = {
+            "gate": {"classes": ["rest", "mi"], **_cv_metrics(gate_cv, ["rest", "mi"])},
+            "side": {"classes": classes[1:], **_cv_metrics(side_cv, classes[1:])},
+        }
+    else:
+        make = lambda: MIModel(classes, clf, feats)
+        metrics["method"] = "single-stage"
+    metrics.update(_cv_metrics(_grouped_cv(make, epochs, y, groups, len(classes)), classes))
+    model = make().fit(epochs, y)                         # final model on all data
     return model, metrics
 
 
@@ -184,12 +208,12 @@ def train_errp(sessions, cfg) -> Tuple[ErrPModel, dict]:
     if len(epochs) < 20 or len(np.unique(y)) < 2:
         raise ValueError(f"Not enough ErrP epochs ({len(epochs)}) with both error and correct.")
     classes = ["correct", "error"]
-    cv = _grouped_cv(lambda: ErrPModel(), epochs, y, groups, 2)
+    cv = _grouped_cv(lambda: ErrPModel(tmax=ERRP_TMAX), epochs, y, groups, 2)
     metrics = {"paradigm": "errp", "classes": classes, "filter": "causal",
-               "method": ErrPModel.method, "n_epochs": len(epochs),
+               "method": ErrPModel.method, "epoch_s": [ERRP_TMIN, ERRP_TMAX], "n_epochs": len(epochs),
                "n_errors": int(np.sum(y == 1)), "n_trials": int(len(np.unique(groups)))}
     metrics.update(_cv_metrics(cv, classes))
-    model = ErrPModel().fit(epochs, y)                    # final model on all data
+    model = ErrPModel(tmax=ERRP_TMAX).fit(epochs, y)      # final model on all data
     return model, metrics
 
 
