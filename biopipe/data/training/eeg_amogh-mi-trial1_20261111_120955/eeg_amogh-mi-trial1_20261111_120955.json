@@ -1,0 +1,73 @@
+{
+  "modality": "eeg",
+  "subject": "amogh_mi_trial1",
+  "created": "2026-11-11T12:09:55",
+  "board": "cyton",
+  "sample_rate": 250,
+  "channels": [
+    {
+      "channel": 0,
+      "electrode": "Fz",
+      "role": "data"
+    },
+    {
+      "channel": 1,
+      "electrode": "FC5",
+      "role": "data"
+    },
+    {
+      "channel": 2,
+      "electrode": "FC6",
+      "role": "data"
+    },
+    {
+      "channel": 3,
+      "electrode": "C3",
+      "role": "data"
+    },
+    {
+      "channel": 4,
+      "electrode": "Cz",
+      "role": "data"
+    },
+    {
+      "channel": 5,
+      "electrode": "C4",
+      "role": "data"
+    },
+    {
+      "channel": 6,
+      "electrode": "P3",
+      "role": "data"
+    },
+    {
+      "channel": 7,
+      "electrode": "P4",
+      "role": "data"
+    }
+  ],
+  "reference": [
+    "A1"
+  ],
+  "bias": [
+    "A2"
+  ],
+  "filter": {
+    "enabled": true,
+    "notch_hz": 50.0,
+    "bandpass": [
+      8.0,
+      30.0
+    ]
+  },
+  "labels": [
+    "mi_left",
+    "mi_right"
+  ],
+  "n_samples": 30088,
+  "duration_s": 120.35,
+  "paradigm": "mi",
+  "n_trials": 30,
+  "description": "",
+  "schema_version": 1
+}

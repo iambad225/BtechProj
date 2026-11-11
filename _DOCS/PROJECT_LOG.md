@@ -207,6 +207,11 @@
     - The rating is a manual note only; training does not use it
   - Tested on real ErrP recordings copied into a scratch folder: rating saved and still there after refresh, JSON otherwise unchanged, dropdown choices set and clear the rating, pooling check and training on a table selection work; the on-screen click → dropdown wasn't exercised, so that no test window could take keyboard focus
 
+- **2026-11-11 — Datasets and models in git**
+  - Legacy-named models: none left (the four old `eeg_…_acc…_<stamp>` folders were already gone); `biopipe/models/` holds only new-style names (`Amogh_cursor_bal0.84`, `amogh_4datasets_bal0.80`, `amogh_5_sets_bal0.81`)
+  - `biopipe/data/` and `biopipe/models/` removed from `biopipe/.gitignore` at the user's request; the 14 recordings (13 ErrP, 1 MI; ~60 MB) and 3 models committed and pushed to the public GitHub repo
+  - The PhysioNet EDFs (`_DOCS/mi_validation_physionet/data/`) are still ignored: a public dataset that can be downloaded again
+
 ## Current state
 
 - **EEG tab subtabs:** Config · Monitor · Record · Live · ErrP Live (arrow feedback or true/false facts test)

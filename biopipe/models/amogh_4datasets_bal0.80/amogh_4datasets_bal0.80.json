@@ -1,0 +1,101 @@
+{
+  "modality": "eeg",
+  "subject": "amogh",
+  "created": "2026-11-11T11:40:52",
+  "model_type": "errp",
+  "source_files": [
+    "data\\training\\eeg_amogh-errp-trial-4-cursor_20261111_113953",
+    "data\\training\\eeg_amogh-errp-trial-3-cursor_20261028_190330",
+    "data\\training\\eeg_amogh-errp-trial-2-cursor_20261028_190035",
+    "data\\training\\eeg_amogh-errp-trial-1-cursor_20261028_185738"
+  ],
+  "channels": [
+    {
+      "channel": 0,
+      "electrode": "Fz",
+      "role": "data"
+    },
+    {
+      "channel": 1,
+      "electrode": "FC5",
+      "role": "data"
+    },
+    {
+      "channel": 2,
+      "electrode": "FC6",
+      "role": "data"
+    },
+    {
+      "channel": 3,
+      "electrode": "C3",
+      "role": "data"
+    },
+    {
+      "channel": 4,
+      "electrode": "Cz",
+      "role": "data"
+    },
+    {
+      "channel": 5,
+      "electrode": "C4",
+      "role": "data"
+    },
+    {
+      "channel": 6,
+      "electrode": "P3",
+      "role": "data"
+    },
+    {
+      "channel": 7,
+      "electrode": "P4",
+      "role": "data"
+    }
+  ],
+  "sample_rate": 250,
+  "labels": [
+    "correct",
+    "error"
+  ],
+  "features": "xdawn+riemann",
+  "window_ms": 2000,
+  "step_ms": 500,
+  "metrics": {
+    "paradigm": "errp",
+    "classes": [
+      "correct",
+      "error"
+    ],
+    "filter": "causal",
+    "method": "xdawn+riemann",
+    "epoch_s": [
+      -0.2,
+      0.8
+    ],
+    "n_epochs": 240,
+    "n_errors": 81,
+    "n_trials": 240,
+    "balanced_accuracy": 0.797,
+    "balanced_accuracy_std": 0.041,
+    "cv_accuracy": 0.817,
+    "macro_f1": 0.796,
+    "cv_folds": 5,
+    "per_class": {
+      "correct": {
+        "precision": 0.866,
+        "recall": 0.855,
+        "f1": 0.861,
+        "support": 159
+      },
+      "error": {
+        "precision": 0.723,
+        "recall": 0.741,
+        "f1": 0.732,
+        "support": 81
+      }
+    },
+    "accuracy": 0.797
+  },
+  "paradigm": "errp",
+  "description": "",
+  "schema_version": 1
+}

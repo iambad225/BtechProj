@@ -1,0 +1,102 @@
+{
+  "modality": "eeg",
+  "subject": "amogh",
+  "created": "2026-11-11T12:24:57",
+  "model_type": "errp",
+  "source_files": [
+    "data\\training\\eeg_amogh-errp-trial-9-cursor_20261111_121431",
+    "data\\training\\eeg_amogh-errp-trial-8-cursor_20261111_120426",
+    "data\\training\\eeg_amogh-errp-trial-4-cursor_20261111_113953",
+    "data\\training\\eeg_amogh-errp-trial-3-cursor_20261028_190330",
+    "data\\training\\eeg_amogh-errp-trial-2-cursor_20261028_190035"
+  ],
+  "channels": [
+    {
+      "channel": 0,
+      "electrode": "Fz",
+      "role": "data"
+    },
+    {
+      "channel": 1,
+      "electrode": "FC5",
+      "role": "data"
+    },
+    {
+      "channel": 2,
+      "electrode": "FC6",
+      "role": "data"
+    },
+    {
+      "channel": 3,
+      "electrode": "C3",
+      "role": "data"
+    },
+    {
+      "channel": 4,
+      "electrode": "Cz",
+      "role": "data"
+    },
+    {
+      "channel": 5,
+      "electrode": "C4",
+      "role": "data"
+    },
+    {
+      "channel": 6,
+      "electrode": "P3",
+      "role": "data"
+    },
+    {
+      "channel": 7,
+      "electrode": "P4",
+      "role": "data"
+    }
+  ],
+  "sample_rate": 250,
+  "labels": [
+    "correct",
+    "error"
+  ],
+  "features": "xdawn+riemann",
+  "window_ms": 2000,
+  "step_ms": 500,
+  "metrics": {
+    "paradigm": "errp",
+    "classes": [
+      "correct",
+      "error"
+    ],
+    "filter": "causal",
+    "method": "xdawn+riemann",
+    "epoch_s": [
+      -0.2,
+      0.8
+    ],
+    "n_epochs": 300,
+    "n_errors": 91,
+    "n_trials": 300,
+    "balanced_accuracy": 0.812,
+    "balanced_accuracy_std": 0.083,
+    "cv_accuracy": 0.84,
+    "macro_f1": 0.81,
+    "cv_folds": 5,
+    "per_class": {
+      "correct": {
+        "precision": 0.885,
+        "recall": 0.885,
+        "f1": 0.885,
+        "support": 209
+      },
+      "error": {
+        "precision": 0.736,
+        "recall": 0.736,
+        "f1": 0.736,
+        "support": 91
+      }
+    },
+    "accuracy": 0.812
+  },
+  "paradigm": "errp",
+  "description": "",
+  "schema_version": 1
+}

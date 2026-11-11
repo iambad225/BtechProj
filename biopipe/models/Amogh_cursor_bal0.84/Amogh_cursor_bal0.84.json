@@ -1,0 +1,99 @@
+{
+  "modality": "eeg",
+  "subject": "Amogh",
+  "created": "2026-11-10T18:39:56",
+  "model_type": "errp",
+  "source_files": [
+    "data\\training\\eeg_amogh-errp-trial-3-cursor_20261028_190330",
+    "data\\training\\eeg_amogh-errp-trial-2-cursor_20261028_190035"
+  ],
+  "channels": [
+    {
+      "channel": 0,
+      "electrode": "Fz",
+      "role": "data"
+    },
+    {
+      "channel": 1,
+      "electrode": "FC5",
+      "role": "data"
+    },
+    {
+      "channel": 2,
+      "electrode": "FC6",
+      "role": "data"
+    },
+    {
+      "channel": 3,
+      "electrode": "C3",
+      "role": "data"
+    },
+    {
+      "channel": 4,
+      "electrode": "Cz",
+      "role": "data"
+    },
+    {
+      "channel": 5,
+      "electrode": "C4",
+      "role": "data"
+    },
+    {
+      "channel": 6,
+      "electrode": "P3",
+      "role": "data"
+    },
+    {
+      "channel": 7,
+      "electrode": "P4",
+      "role": "data"
+    }
+  ],
+  "sample_rate": 250,
+  "labels": [
+    "correct",
+    "error"
+  ],
+  "features": "xdawn+riemann",
+  "window_ms": 2000,
+  "step_ms": 500,
+  "metrics": {
+    "paradigm": "errp",
+    "classes": [
+      "correct",
+      "error"
+    ],
+    "filter": "causal",
+    "method": "xdawn+riemann",
+    "epoch_s": [
+      -0.2,
+      0.8
+    ],
+    "n_epochs": 120,
+    "n_errors": 47,
+    "n_trials": 120,
+    "balanced_accuracy": 0.841,
+    "balanced_accuracy_std": 0.048,
+    "cv_accuracy": 0.858,
+    "macro_f1": 0.848,
+    "cv_folds": 5,
+    "per_class": {
+      "correct": {
+        "precision": 0.859,
+        "recall": 0.918,
+        "f1": 0.887,
+        "support": 73
+      },
+      "error": {
+        "precision": 0.857,
+        "recall": 0.766,
+        "f1": 0.809,
+        "support": 47
+      }
+    },
+    "accuracy": 0.841
+  },
+  "paradigm": "errp",
+  "description": "",
+  "schema_version": 1
+}

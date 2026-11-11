@@ -244,7 +244,8 @@ EMG models by the `modality` in each JSON, not by the folder name.
   for every class; EMG adds subset `accuracy`, `n_trials`, `split`; EEG adds `balanced_accuracy`
   (± `balanced_accuracy_std`), `macro_f1`, `cv_folds`, `classes`, and `classifier`.
 
-`data/` and `models/` are git-ignored (they're your captured data).
+`data/` (recordings) and `models/` (trained models) are tracked in git, so the datasets and
+models are on GitHub with the code.
 
 ---
 
@@ -291,8 +292,8 @@ biopipe/
   gui/                    # app, emg_tab, eeg_tab, train_tab
     widgets/              # montage_10_20, waveform, bars, waterfall, profile_bar
   config/  profiles/      # named saved configs per modality
-  data/    (git-ignored)  training/   acquired/
-  models/  (git-ignored)
+  data/    training/   acquired/      # recordings (tracked)
+  models/                             # trained models (tracked)
 ```
 
 ---

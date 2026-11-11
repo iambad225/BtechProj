@@ -3,11 +3,6 @@ __pycache__/
 .venv/
 venv/
 
-# Generated at runtime
-data/training/
-data/acquired/
-models/
-
 # PyInstaller build artifacts (if you build an exe later)
 build/
 dist/
