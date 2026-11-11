@@ -200,6 +200,13 @@
     - Tested on the real cursor recordings: subject empty after selecting, save refused without it (even with a Name), `Amogh_cursor_bal0.75` saved and listed with subject `Amogh` in its JSON
   - All work since 27a35c3 (stop recording, per-model ErrP window, two-stage MI, MI validation folder, model naming) committed as `0fdd858` on `main` and pushed to GitHub; the deleted roadmap PDF, the `4channel emg acquisition` submodule change and the root `eeg_config.yaml` left out
 
+- **2026-11-11 — Recording ratings in the Train tab**
+  - The recordings list is now a table (Recording · Labels · **Rating (1-5)**) with a scrollbar; clicking a rating cell drops down 1–5 or *not rated*, to record how much each dataset helps model accuracy
+    - Clicking a rating leaves the selection alone, so Ctrl/Shift-click pools stay intact; pooled recordings are still used in list order
+    - Saved as `rating` in the recording's JSON (0 = not rated; every other field kept); also shown in the *Selected recording* panel
+    - The rating is a manual note only; training does not use it
+  - Tested on real ErrP recordings copied into a scratch folder: rating saved and still there after refresh, JSON otherwise unchanged, dropdown choices set and clear the rating, pooling check and training on a table selection work; the on-screen click → dropdown wasn't exercised, so that no test window could take keyboard focus
+
 ## Current state
 
 - **EEG tab subtabs:** Config · Monitor · Record · Live · ErrP Live (arrow feedback or true/false facts test)

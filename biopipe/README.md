@@ -138,6 +138,12 @@ arrow responses differ. Select one or more recordings
 (Ctrl/Shift-click to pool; **↻ Refresh** to pick up new ones), review each one's metadata +
 description, then **Train** and **Save model**.
 
+The recordings list has a **Rating (1-5)** column at its right edge: click a recording's rating
+for a dropdown (1–5 or *not rated*) and record how much that dataset helps a model's accuracy.
+Clicking a rating doesn't change the selection, so a Ctrl/Shift-click pool stays intact. The
+rating is saved as `rating` in the recording's JSON (0 = not rated) and is shown in the
+*Selected recording* panel.
+
 **Naming a model** (EEG and EMG alike): the name is `<subject>_<name>_<scores>`, previewed as
 *Saves as:* under the fields.
 - **Subject\*** is required and typed in by hand; **Save model** refuses an empty subject.
@@ -219,7 +225,8 @@ Two files sharing the folder's base name:
   "filter": {"enabled": true, "notch_hz": 50, "bandpass": [20, 120]},
   "labels": ["fist", "open_hand"], "n_samples": 30000, "duration_s": 120,
   "paradigm": "", "n_trials": 24,
-  "description": "optional note entered before saving"
+  "description": "optional note entered before saving",
+  "rating": 4
 }
 ```
 

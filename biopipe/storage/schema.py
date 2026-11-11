@@ -65,6 +65,7 @@ class RecordingMeta:
     paradigm: str = ""              # eeg: "mi" | "errp" | "" (generic/monitor)
     n_trials: int = 0               # number of labelled trials (runs of a constant label)
     description: str = ""
+    rating: int = 0                 # user's 1-5 rating of how much it helps a model; 0 = unrated
     schema_version: int = SCHEMA_VERSION
 
     def folder_name(self) -> str:

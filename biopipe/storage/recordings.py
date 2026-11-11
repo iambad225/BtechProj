@@ -10,6 +10,7 @@ sessions live under ``data/training/``; raw/live captures under ``data/acquired/
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 from typing import List, Tuple
 
@@ -86,6 +87,15 @@ def list_recordings(modality: str, training: bool = True) -> List[dict]:
                 continue
     out.sort(key=lambda e: e["meta"].created, reverse=True)
     return out
+
+
+def set_rating(folder: str | Path, rating: int) -> None:
+    """Store the user's 1-5 rating (0 = none) in the recording's JSON, keeping every other field."""
+    folder = Path(folder)
+    j = folder / f"{folder.name}.json"
+    d = json.loads(j.read_text(encoding="utf-8"))
+    d["rating"] = int(rating)
+    j.write_text(json.dumps(d, indent=2), encoding="utf-8")
 
 
 def load_session(folder: str | Path) -> Tuple[np.ndarray, List[str], List[int], RecordingMeta]:

@@ -26,6 +26,7 @@ EEG_PARADIGMS = {
     "ErrP": ("errp", "errp", "xdawn+riemann"),
 }
 MI_LABEL = "MI (2-stage)"
+RATINGS = (1, 2, 3, 4, 5)      # user's rating of how much a recording helps a model's accuracy
 
 
 def _cfg_from_meta(meta, window_ms, step_ms, paradigm="") -> Config:
@@ -81,12 +82,26 @@ class TrainTab(ttk.Frame):
             w.grid(row=0, column=col, padx=(8, 2) if col == 7 else 2)
         ttk.Button(top, text="↻ Refresh", command=self._refresh).grid(row=0, column=10, padx=(8, 0))
 
-        lf = ttk.LabelFrame(self, text="Recordings (Ctrl/Shift-click to pool)", padding=6)
+        lf = ttk.LabelFrame(self, text="Recordings (Ctrl/Shift-click to pool · click a rating "
+                                       "to change it)", padding=6)
         lf.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
         lf.columnconfigure(0, weight=1); lf.rowconfigure(0, weight=1)
-        self.rec_list = tk.Listbox(lf, selectmode="extended", exportselection=False)
+        # one row per recording; the Rating column at the right edge opens a 1-5 dropdown
+        self.rec_list = ttk.Treeview(lf, columns=("name", "labels", "rating"), show="headings",
+                                     selectmode="extended")
+        for col, text, width, stretch, anchor in (("name", "Recording", 300, True, "w"),
+                                                  ("labels", "Labels", 120, False, "w"),
+                                                  ("rating", "Rating (1-5)", 90, False, "center")):
+            self.rec_list.heading(col, text=text, anchor=anchor)
+            self.rec_list.column(col, width=width, minwidth=60, stretch=stretch, anchor=anchor)
         self.rec_list.grid(row=0, column=0, sticky="nsew")
-        self.rec_list.bind("<<ListboxSelect>>", lambda e: self._on_select())
+        ys = ttk.Scrollbar(lf, orient="vertical", command=self.rec_list.yview)
+        ys.grid(row=0, column=1, sticky="ns")
+        self.rec_list.configure(yscrollcommand=ys.set)
+        self.rec_list.bind("<<TreeviewSelect>>", lambda e: self._on_select())
+        self.rec_list.bind("<Button-1>", self._on_list_click)
+        self._rate_menu = tk.Menu(self, tearoff=0)
+        self._rate_var = tk.IntVar(value=0)
 
         rf = ttk.LabelFrame(self, text="Selected recording", padding=6)
         rf.grid(row=1, column=1, sticky="nsew")
@@ -163,10 +178,11 @@ class TrainTab(ttk.Frame):
             src_tag = self._eeg_paradigm()[1]
             entries = [e for e in entries if (e["meta"].paradigm or "") == src_tag]
         self._entries = entries
-        self.rec_list.delete(0, tk.END)
-        for e in self._entries:
+        self.rec_list.delete(*self.rec_list.get_children())
+        for i, e in enumerate(self._entries):
             m = e["meta"]
-            self.rec_list.insert(tk.END, f"{e['folder'].name}   [{', '.join(m.labels)}]")
+            self.rec_list.insert("", "end", iid=str(i), values=(
+                e["folder"].name, ", ".join(m.labels), self._rating_text(m.rating)))
         self.meta_text.delete("1.0", tk.END)
         tag = f" ({self._eeg_paradigm()[1]} recordings)" if self._is_eeg() else ""
         self.compat.config(text=f"{len(self._entries)} recording(s) for {self.v_mod.get().upper()}{tag}")
@@ -175,18 +191,24 @@ class TrainTab(ttk.Frame):
         self.metrics_lbl.config(text="")
         self._show_name()
 
+    def _sel_indices(self):
+        """Selected rows in list order (as the old listbox gave them)."""
+        return sorted(int(i) for i in self.rec_list.selection())
+
     def _selected_metas(self):
-        return [self._entries[i]["meta"] for i in self.rec_list.curselection()]
+        return [self._entries[i]["meta"] for i in self._sel_indices()]
 
     def _on_select(self):
-        sel = self.rec_list.curselection()
+        sel = self._sel_indices()
         if not sel:
             return
-        m = self._entries[sel[-1]]["meta"]
+        focus = self.rec_list.focus()                    # the row clicked last, if selected
+        m = self._entries[int(focus) if focus and int(focus) in sel else sel[-1]]["meta"]
         chans = "\n".join(f"  ch{c.channel}: {c.electrode}" for c in m.channels)
         self.meta_text.delete("1.0", tk.END)
         self.meta_text.insert(tk.END,
             f"subject: {m.subject}\ncreated: {m.created}\nparadigm: {m.paradigm or '-'}\n"
+            f"rating: {f'{m.rating} / 5' if m.rating else 'not rated'}\n"
             f"sample_rate: {m.sample_rate} Hz\nsamples: {m.n_samples} ({m.duration_s}s)\n"
             f"labels: {', '.join(m.labels)}\nreference: {m.reference}  bias: {m.bias}\n"
             f"electrodes:\n{chans}\n\ndescription:\n{m.description or '(none)'}")
@@ -196,6 +218,58 @@ class TrainTab(ttk.Frame):
             self.compat.config(text=msg, foreground=("#0a7" if ok else "#a00"))
         else:
             self.compat.config(text=f"{len(metas)} selected", foreground="#555")
+
+    # ---- recording ratings ----
+    @staticmethod
+    def _rating_text(rating):
+        return f"{rating}  \u25be" if rating else "\u2013  \u25be"     # "3  ▾" / "–  ▾"
+
+    def _on_list_click(self, event):
+        """A click on a Rating cell opens the 1-5 dropdown for that recording and leaves the
+        selection as it was (so rating doesn't break a Ctrl/Shift-click pool)."""
+        tv = self.rec_list
+        if tv.identify_region(event.x, event.y) != "cell" or tv.identify_column(event.x) != "#3":
+            return None
+        iid = tv.identify_row(event.y)
+        if not iid:
+            return None
+        self._open_rating_menu(iid)
+        return "break"
+
+    def _build_rating_menu(self, iid):
+        menu = self._rate_menu
+        menu.delete(0, "end")
+        self._rate_var.set(self._entries[int(iid)]["meta"].rating)
+        for r in RATINGS:
+            menu.add_radiobutton(label=str(r), value=r, variable=self._rate_var,
+                                 command=lambda r=r: self._set_rating(iid, r))
+        menu.add_separator()
+        menu.add_radiobutton(label="not rated", value=0, variable=self._rate_var,
+                             command=lambda: self._set_rating(iid, 0))
+        return menu
+
+    def _open_rating_menu(self, iid):
+        bbox = self.rec_list.bbox(iid, "rating")
+        if not bbox:
+            return
+        x, y, w, h = bbox
+        menu = self._build_rating_menu(iid)
+        try:                                             # drop down just under the cell
+            menu.tk_popup(self.rec_list.winfo_rootx() + x, self.rec_list.winfo_rooty() + y + h)
+        finally:
+            menu.grab_release()
+
+    def _set_rating(self, iid, rating):
+        """Save the rating in the recording's JSON and show it in the list."""
+        e = self._entries[int(iid)]
+        try:
+            recordings.set_rating(e["folder"], rating)
+        except OSError as ex:
+            messagebox.showerror("Rating not saved", str(ex)); return
+        e["meta"].rating = int(rating)
+        self.rec_list.set(iid, "rating", self._rating_text(rating))
+        if iid in self.rec_list.selection():
+            self._on_select()
 
     @staticmethod
     def _scores_text(metrics):
@@ -240,7 +314,7 @@ class TrainTab(ttk.Frame):
             messagebox.showerror("Invalid", "Window/Step must be numbers."); return
         self.train_btn.config(state="disabled")
         self.metrics_lbl.config(text="Training...", foreground="#555")
-        folders = [self._entries[i]["folder"] for i in self.rec_list.curselection()]
+        folders = [self._entries[i]["folder"] for i in self._sel_indices()]
         args = (folders, metas, win, step, self.v_mod.get(),
                 (self._eeg_paradigm() if self._is_eeg() else None), self.v_model.get(),
                 self.v_feat.get())
